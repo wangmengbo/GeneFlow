@@ -5,6 +5,7 @@ import torch
 import argparse
 import numpy as np
 import pandas as pd
+import seaborn as sns
 import logging
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
@@ -13,8 +14,8 @@ import matplotlib.pyplot as plt
 # Import our modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dataset import CellImageGeneDataset
-from unet import RNAConditionedUNet
 from model import RNAtoHnEModel
+from gene_utils import visualize_gene_importance
 from rectified_flow import RectifiedFlow, EulerSolver
 from rectified_train import train_with_rectified_flow, generate_images_with_rectified_flow
 
@@ -35,15 +36,15 @@ def main():
     parser.add_argument('--image_paths', type=str, default="test_cell_256/input/cell_image_paths.json", help='Path to JSON file with image paths.')
     parser.add_argument('--output_dir', type=str, default='test_cell_256/output_rectified', help='Directory to save outputs.')
     parser.add_argument('--epochs', type=int, default=10, help='Number of training epochs.')
-    parser.add_argument('--batch_size', type=int, default=32, help='Batch size for training and evaluation.')
+    parser.add_argument('--batch_size', type=int, default=6, help='Batch size for training and evaluation.')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate for optimizer.')
     parser.add_argument('--weight_decay', type=float, default=0.01, help='Weight decay for optimizer.')
-    parser.add_argument('--img_size', type=int, default=64, help='Size of the generated images.')
+    parser.add_argument('--img_size', type=int, default=256, help='Size of the generated images.')
     parser.add_argument('--img_channels', type=int, default=3, help='Number of image channels (1 for grayscale, 3 for RGB).')
     parser.add_argument('--use_amp', action='store_true', help='Use automatic mixed precision for training.')
     parser.add_argument('--patience', type=int, default=10, help='Early stopping patience.')
     parser.add_argument('--gen_steps', type=int, default=100, help='Number of steps for Euler solver during generation.')
-    parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility.')
+    parser.add_argument('--seed', type=int, default=np.random.randint(100), help='Random seed for reproducibility.')
     args = parser.parse_args()
 
     # Create output directory
@@ -151,6 +152,22 @@ def main():
     # Load best model for evaluation
     checkpoint = torch.load(best_model_path, weights_only=True)
     model.load_state_dict(checkpoint["model"])
+
+    # Visualize gene importance
+    logger.info("Analyzing gene importance...")
+    gene_names = expr_df.columns.tolist()
+    gene_importance = visualize_gene_importance(
+        model=model,
+        gene_names=gene_names,
+        output_dir=args.output_dir,
+        expr_df=expr_df  # Pass the expression dataframe
+    )
+
+    # Print top 10 most important genes
+    logger.info("Top 10 most important genes:")
+    for i, (gene, importance) in enumerate(zip(gene_importance['Gene'].head(10), 
+                                            gene_importance['Importance'].head(10))):
+        logger.info(f"{i+1}. {gene}: {importance:.6f}")
     
     # Generate images from validation set
     logger.info("Generating images from validation set...")

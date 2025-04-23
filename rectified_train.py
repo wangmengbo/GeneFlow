@@ -105,9 +105,10 @@ def train_with_rectified_flow(
             target_velocity = path_sample["velocity"]
             
             # Predict vector field with mixed precision
-            with torch.cuda.amp.autocast(enabled=use_amp):
+            with torch.amp.autocast('cuda',enabled=use_amp):
                 v_pred = model(x_t, t, gene_expr)
-                loss = rectified_flow.loss_fn(v_pred, target_velocity)
+                l1_penalty = torch.sum(torch.abs(model.rna_encoder.encoder[0].weight)) * 0.001
+                loss = rectified_flow.loss_fn(v_pred, target_velocity) + l1_penalty
             
             # Backpropagation with loss scaling
             if use_amp:
@@ -145,9 +146,10 @@ def train_with_rectified_flow(
                 target_velocity = path_sample["velocity"]
                 
                 # Predict vector field
-                with torch.cuda.amp.autocast(enabled=use_amp):
+                with torch.amp.autocast('cuda', enabled=use_amp):
                     v_pred = model(x_t, t, gene_expr)
-                    loss = rectified_flow.loss_fn(v_pred, target_velocity)
+                    l1_penalty = torch.sum(torch.abs(model.rna_encoder.encoder[0].weight)) * 0.001
+                    loss = rectified_flow.loss_fn(v_pred, target_velocity) + l1_penalty
                 
                 val_loss_metric.update(loss)
         
