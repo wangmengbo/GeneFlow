@@ -2,6 +2,7 @@ import json
 import tifffile
 import numpy as np
 import logging
+import torch
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from PIL import Image as PILImage
@@ -70,37 +71,120 @@ class CellImageGeneDataset(Dataset):
             # Try to open as TIFF first
             image = tifffile.imread(img_path)
             
-            # Normalize TIFF image if it's 16-bit
-            if image.dtype == np.uint16:
-                # Normalize to [0, 1]
-                image = ((image - np.min(image) + 0.0001) / (np.max(image) - np.min(image) + 0.0001))
-                image = (image * 255).astype(np.uint8)
+            # Check if we have a multi-channel image with 3 or more channels
+            if len(image.shape) == 3 and image.shape[2] >= 3:
+                # Split into RGB (first 3 channels) and auxiliary channels (remaining channels)
+                rgb_image = image[:, :, :3]
                 
-            # Convert to PIL image for transforms
-            if len(image.shape) == 2:
-                # Grayscale
-                pil_img = PILImage.fromarray(image, mode='L')
-                # Convert to RGB if needed
-                if self.img_channels == 3:
-                    pil_img = pil_img.convert('RGB')
+                # Get auxiliary channels if any exist
+                aux_channels = []
+                if image.shape[2] > 3:
+                    for i in range(3, image.shape[2]):
+                        aux_channels.append(image[:, :, i])
+                
+                # Normalize RGB if needed
+                if rgb_image.dtype == np.uint16:
+                    rgb_image = ((rgb_image - np.min(rgb_image) + 0.0001) / (np.max(rgb_image) - np.min(rgb_image) + 0.0001))
+                    rgb_image = (rgb_image * 255).astype(np.uint8)
+                
+                # Convert RGB to PIL image for transforms
+                rgb_pil = PILImage.fromarray(rgb_image)
+                
+                # Process auxiliary channels
+                aux_pil_channels = []
+                for aux_channel in aux_channels:
+                    # Normalize if needed
+                    if aux_channel.dtype == np.uint16:
+                        aux_channel = ((aux_channel - np.min(aux_channel) + 0.0001) / (np.max(aux_channel) - np.min(aux_channel) + 0.0001))
+                        aux_channel = (aux_channel * 255).astype(np.uint8)
+                    
+                    # Convert to PIL image and convert to RGB to match the expected channel count
+                    aux_pil = PILImage.fromarray(aux_channel, mode='L')
+                    aux_pil = aux_pil.convert('RGB')  # Convert to RGB to match transform expectations
+                    aux_pil_channels.append(aux_pil)
+                
+                # Apply transforms
+                if self.transform:
+                    rgb_transformed = self.transform(rgb_pil)
+                    
+                    aux_transformed = []
+                    for aux_pil in aux_pil_channels:
+                        aux_transformed.append(self.transform(aux_pil))
+                    
+                    # Now we need to extract just the first channel from each aux_transformed
+                    # since we converted them to RGB but only need the first channel
+                    
+                    # All transformed images should now be tensors with shape [C, H, W]
+                    # For RGB: shape is [3, H, W]
+                    # For aux (converted to RGB): shape is [3, H, W] but all channels are identical
+                    
+                    # Extract only the first channel from each aux tensor and reshape
+                    aux_single_channels = []
+                    for aux_tensor in aux_transformed:
+                        # Take only the first channel and keep dimensions
+                        aux_single_channel = aux_tensor[0:1]  # Shape: [1, H, W]
+                        aux_single_channels.append(aux_single_channel)
+                    
+                    # Concatenate all tensors along the channel dimension
+                    # RGB tensor shape: [3, H, W]
+                    # Each aux tensor shape: [1, H, W]
+                    image = torch.cat([rgb_transformed] + aux_single_channels, dim=0)
+                    
+                else:
+                    # If no transforms, convert to tensors manually
+                    rgb_tensor = transforms.ToTensor()(rgb_pil)
+                    
+                    aux_tensors = []
+                    for aux_pil in aux_pil_channels:
+                        # Convert back to grayscale if we converted to RGB earlier
+                        if aux_pil.mode == 'RGB':
+                            aux_pil = aux_pil.convert('L')
+                        aux_tensor = transforms.ToTensor()(aux_pil)  # Shape: [1, H, W]
+                        aux_tensors.append(aux_tensor)
+                    
+                    # Concatenate all tensors
+                    image = torch.cat([rgb_tensor] + aux_tensors, dim=0)
+                    
             else:
-                # Already RGB
-                pil_img = PILImage.fromarray(image)
+                # Handle standard images (1 or 3 channels)
+                # Normalize TIFF image if it's 16-bit
+                if image.dtype == np.uint16:
+                    # Normalize to [0, 1]
+                    image = ((image - np.min(image) + 0.0001) / (np.max(image) - np.min(image) + 0.0001))
+                    image = (image * 255).astype(np.uint8)
+                    
+                # Convert to PIL image for transforms
+                if len(image.shape) == 2:
+                    # Grayscale
+                    pil_img = PILImage.fromarray(image, mode='L')
+                    # Convert to RGB if needed
+                    if self.img_channels == 3:
+                        pil_img = pil_img.convert('RGB')
+                else:
+                    # Already RGB
+                    pil_img = PILImage.fromarray(image)
+                    
+                # Apply transforms
+                if self.transform:
+                    image = self.transform(pil_img)
                 
         except Exception as e:
             logger.error(f"Error loading image {img_path}: {e}")
             # Create a blank image as fallback
-            if self.img_channels == 1:
+            if hasattr(self, 'img_channels') and self.img_channels == 1:
                 pil_img = PILImage.new('L', (self.img_size, self.img_size), 0)
             else:
                 pil_img = PILImage.new('RGB', (self.img_size, self.img_size), (0, 0, 0))
-        
-        # Apply transforms
-        if self.transform:
-            image = self.transform(pil_img)
+            
+            # Apply transforms
+            if self.transform:
+                image = self.transform(pil_img)
         
         return {
             'cell_id': cell_id,
             'gene_expr': gene_expr,
             'image': image
         }
+
+
+
