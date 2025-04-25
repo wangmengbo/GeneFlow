@@ -15,7 +15,6 @@ import matplotlib.pyplot as plt
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dataset import CellImageGeneDataset
 from model import RNAtoHnEModel
-from gene_utils import visualize_gene_importance
 from rectified_flow import RectifiedFlow, EulerSolver
 from rectified_train import train_with_rectified_flow, generate_images_with_rectified_flow
 
@@ -33,16 +32,16 @@ logger = logging.getLogger(__name__)
 def main():
     parser = argparse.ArgumentParser(description="Train and evaluate RNA to H&E cell image generator with Rectified Flow.")
     parser.add_argument('--gene_expr', type=str, default="test_cell_256/input/normalized.csv", help='Path to gene expression CSV file.')
-    parser.add_argument('--image_paths', type=str, default="test_cell_256/input/cell_image_paths.json", help='Path to JSON file with image paths.')
-    parser.add_argument('--output_dir', type=str, default='test_cell_256/output_rectified', help='Directory to save outputs.')
+    parser.add_argument('--image_paths', type=str, default="cell_256_aux/input/cell_image_paths.json", help='Path to JSON file with image paths.')
+    parser.add_argument('--output_dir', type=str, default='cell_256_aux/output_rectified', help='Directory to save outputs.')
     parser.add_argument('--epochs', type=int, default=10, help='Number of training epochs.')
     parser.add_argument('--batch_size', type=int, default=6, help='Batch size for training and evaluation.')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate for optimizer.')
     parser.add_argument('--weight_decay', type=float, default=0.01, help='Weight decay for optimizer.')
     parser.add_argument('--img_size', type=int, default=256, help='Size of the generated images.')
-    parser.add_argument('--img_channels', type=int, default=3, help='Number of image channels (1 for grayscale, 3 for RGB).')
+    parser.add_argument('--img_channels', type=int, default=4, help='Number of image channels (3 for RGB, 1 Greyscale).')
     parser.add_argument('--use_amp', action='store_true', help='Use automatic mixed precision for training.')
-    parser.add_argument('--patience', type=int, default=10, help='Early stopping patience.')
+    parser.add_argument('--patience', type=int, default=5, help='Early stopping patience.')
     parser.add_argument('--gen_steps', type=int, default=100, help='Number of steps for Euler solver during generation.')
     parser.add_argument('--seed', type=int, default=np.random.randint(100), help='Random seed for reproducibility.')
     args = parser.parse_args()
@@ -74,6 +73,7 @@ def main():
         expr_df, 
         image_paths, 
         img_size=args.img_size,
+        img_channels=args.img_channels,
         transform=transforms.Compose([
             transforms.ToTensor(),
             transforms.Resize((args.img_size, args.img_size), antialias=True),
@@ -152,22 +152,6 @@ def main():
     # Load best model for evaluation
     checkpoint = torch.load(best_model_path, weights_only=True)
     model.load_state_dict(checkpoint["model"])
-
-    # Visualize gene importance
-    logger.info("Analyzing gene importance...")
-    gene_names = expr_df.columns.tolist()
-    gene_importance = visualize_gene_importance(
-        model=model,
-        gene_names=gene_names,
-        output_dir=args.output_dir,
-        expr_df=expr_df  # Pass the expression dataframe
-    )
-
-    # Print top 10 most important genes
-    logger.info("Top 10 most important genes:")
-    for i, (gene, importance) in enumerate(zip(gene_importance['Gene'].head(10), 
-                                            gene_importance['Importance'].head(10))):
-        logger.info(f"{i+1}. {gene}: {importance:.6f}")
     
     # Generate images from validation set
     logger.info("Generating images from validation set...")
@@ -177,13 +161,13 @@ def main():
     vis_indices = torch.randperm(len(val_dataset))[:num_vis_samples]
     vis_dataset = torch.utils.data.Subset(val_dataset, vis_indices)
     vis_loader = DataLoader(vis_dataset, batch_size=num_vis_samples, shuffle=False)
-    
+
     # Get a batch of data
     batch = next(iter(vis_loader))
     gene_expr = batch['gene_expr'].to(device)
     real_images = batch['image']
     cell_ids = batch['cell_id']
-    
+
     # Generate images with rectified flow
     generated_images = generate_images_with_rectified_flow(
         model=model,
@@ -192,50 +176,84 @@ def main():
         device=device,
         num_steps=args.gen_steps
     )
-    
+
     # Save results
     os.makedirs(os.path.join(args.output_dir, "generated_images"), exist_ok=True)
-    
-    # Plot results
-    fig, axes = plt.subplots(2, num_vis_samples, figsize=(2*num_vis_samples, 5))
-    
+
+    # Calculate number of extra channels beyond RGB
+    num_channels = args.img_channels
+    num_extra_channels = max(0, num_channels - 3)
+
+    # Calculate number of rows needed:
+    # 2 rows for RGB (real and generated)
+    # Plus 2 rows for each extra channel (real and generated)
+    num_rows = 2 + (2 * num_extra_channels)
+
+    # Create the figure
+    fig, axes = plt.subplots(num_rows, num_vis_samples, figsize=(3*num_vis_samples, 2*num_rows))
+
+    # Ensure axes is a 2D array for consistent indexing
+    if num_vis_samples == 1:
+        axes = np.expand_dims(axes, axis=1)
+    if num_rows == 1:
+        axes = np.expand_dims(axes, axis=0)
+
     for i in range(num_vis_samples):
-        # Real image
+        # Real image processing
         real_img = real_images[i].cpu().numpy().transpose(1, 2, 0) * 0.5 + 0.5
-        axes[0, i].imshow(real_img)
-        axes[0, i].set_title(f"Real: {cell_ids[i]}")
-        axes[0, i].axis('off')
-    
-        # Generated image
+        
+        # Generated image processing
         gen_img = generated_images[i].cpu().numpy().transpose(1, 2, 0)
-        axes[1, i].imshow(gen_img)
-        axes[1, i].set_title("Generated")
+        
+        # Display RGB composites for both real and generated images (first 3 channels)
+        # Real RGB composite
+        axes[0, i].imshow(real_img[:,:,:3])
+        axes[0, i].set_title(f"Real RGB: {cell_ids[i]}")
+        axes[0, i].axis('off')
+        
+        # Generated RGB composite
+        axes[1, i].imshow(gen_img[:,:,:3])
+        axes[1, i].set_title("Generated RGB")
         axes[1, i].axis('off')
-    
-        # Save individual images
-        if args.img_channels == 1:
-            # Save as grayscale
+        
+        # Save RGB representations
+        plt.imsave(
+            os.path.join(args.output_dir, "generated_images", f"{cell_ids[i]}_real_rgb.png"),
+            real_img[:,:,:3]
+        )
+        plt.imsave(
+            os.path.join(args.output_dir, "generated_images", f"{cell_ids[i]}_gen_rgb.png"),
+            gen_img[:,:,:3]
+        )
+        
+        # Display each extra channel separately (channels 3 and beyond)
+        for c in range(3, num_channels):
+            # Calculate row indices for extra channels
+            real_row_idx = 2 + (2 * (c - 3))
+            gen_row_idx = 3 + (2 * (c - 3))
+            
+            # Real image extra channel
+            axes[real_row_idx, i].imshow(real_img[:,:,c], cmap='gray')
+            axes[real_row_idx, i].set_title(f"Real Ch{c}")
+            axes[real_row_idx, i].axis('off')
+            
+            # Generated image extra channel
+            axes[gen_row_idx, i].imshow(gen_img[:,:,c], cmap='gray')
+            axes[gen_row_idx, i].set_title(f"Gen Ch{c}")
+            axes[gen_row_idx, i].axis('off')
+            
+            # Save individual extra channel images
             plt.imsave(
-                os.path.join(args.output_dir, "generated_images", f"{cell_ids[i]}_real.png"),
-                real_img[:,:,0],
+                os.path.join(args.output_dir, "generated_images", f"{cell_ids[i]}_real_ch{c}.png"),
+                real_img[:,:,c],
                 cmap='gray'
             )
             plt.imsave(
-                os.path.join(args.output_dir, "generated_images", f"{cell_ids[i]}_gen.png"),
-                gen_img[:,:,0],
+                os.path.join(args.output_dir, "generated_images", f"{cell_ids[i]}_gen_ch{c}.png"),
+                gen_img[:,:,c],
                 cmap='gray'
             )
-        else:
-            # Save as RGB
-            plt.imsave(
-                os.path.join(args.output_dir, "generated_images", f"{cell_ids[i]}_real.png"),
-                real_img
-            )
-            plt.imsave(
-                os.path.join(args.output_dir, "generated_images", f"{cell_ids[i]}_gen.png"),
-                gen_img
-            )
-    
+
     plt.tight_layout()
     plt.savefig(os.path.join(args.output_dir, "generation_results.png"))
     

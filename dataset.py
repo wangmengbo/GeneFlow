@@ -70,6 +70,7 @@ class CellImageGeneDataset(Dataset):
         try:
             # Try to open as TIFF first
             image = tifffile.imread(img_path)
+            image = image[:,:,:self.img_channels]
             
             # Check if we have a multi-channel image with 3 or more channels
             if len(image.shape) == 3 and image.shape[2] >= 3:
