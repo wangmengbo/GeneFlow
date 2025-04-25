@@ -83,8 +83,6 @@ def main():
 		transform=transforms.Compose([
             transforms.ToTensor(),
             transforms.Resize((args.img_size, args.img_size), antialias=True),
-            transforms.Normalize((0.5,), (0.5,)) if args.img_channels == 1 
-            else transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
         ])
     )
     
