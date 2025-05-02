@@ -1,7 +1,4 @@
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import DataLoader
 from torchmetrics.aggregation import MeanMetric
 from tqdm import tqdm
 import logging
@@ -201,7 +198,6 @@ def generate_images_with_rectified_flow(model, rectified_flow, gene_expr, device
     )
     
     # Denormalize images
-    generated_images = generated_images * 0.5 + 0.5
     generated_images = torch.clamp(generated_images, 0, 1)
     
     return generated_images

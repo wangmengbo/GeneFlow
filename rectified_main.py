@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 def main():
     parser = argparse.ArgumentParser(description="Train and evaluate RNA to H&E cell image generator with Rectified Flow.")
-    parser.add_argument('--gene_expr', type=str, default="test_cell_256/input/normalized.csv", help='Path to gene expression CSV file.')
+    parser.add_argument('--gene_expr', type=str, default="cell_256_aux/normalized.csv", help='Path to gene expression CSV file.')
     parser.add_argument('--image_paths', type=str, default="cell_256_aux/input/cell_image_paths.json", help='Path to JSON file with image paths.')
     parser.add_argument('--output_dir', type=str, default='cell_256_aux/output_rectified', help='Directory to save outputs.')
     parser.add_argument('--epochs', type=int, default=10, help='Number of training epochs.')
@@ -198,7 +198,7 @@ def main():
 
     for i in range(num_vis_samples):
         # Real image processing
-        real_img = real_images[i].cpu().numpy().transpose(1, 2, 0) * 0.5 + 0.5
+        real_img = real_images[i].cpu().numpy().transpose(1, 2, 0)
         
         # Generated image processing
         gen_img = generated_images[i].cpu().numpy().transpose(1, 2, 0)
