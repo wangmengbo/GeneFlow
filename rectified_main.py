@@ -18,6 +18,12 @@ from model import RNAtoHnEModel
 from rectified_flow import RectifiedFlow, EulerSolver
 from rectified_train import train_with_rectified_flow, generate_images_with_rectified_flow
 
+# sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# from ..utils import setup_parser, parse_adata
+# from .. import utils
+from utils import setup_parser, parse_adata
+
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -44,6 +50,7 @@ def main():
     parser.add_argument('--patience', type=int, default=5, help='Early stopping patience.')
     parser.add_argument('--gen_steps', type=int, default=100, help='Number of steps for Euler solver during generation.')
     parser.add_argument('--seed', type=int, default=np.random.randint(100), help='Random seed for reproducibility.')
+    parser = setup_parser(parser)
     args = parser.parse_args()
 
     # Create output directory
@@ -58,8 +65,12 @@ def main():
     np.random.seed(args.seed)
     
     # Load gene expression data
-    logger.info(f"Loading gene expression data from {args.gene_expr}")
-    expr_df = pd.read_csv(args.gene_expr, index_col=0)
+    if args.adata is not None:
+        logger.info(f"Loading AnnData from {args.adata}")
+        expr_df, _ = parse_adata(args)
+    else:
+        logger.info(f"Loading gene expression data from {args.gene_expr}")
+        expr_df = pd.read_csv(args.gene_expr, index_col=0)
     logger.info(f"Loaded gene expression data with shape: {expr_df.shape}")
     
     # Load image paths
