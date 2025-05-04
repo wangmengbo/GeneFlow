@@ -161,8 +161,18 @@ def train_with_rectified_flow(
         # Save best model and check for early stopping
         if val_loss < best_val_loss:
             best_val_loss = val_loss
+
+            model_config = {
+                'rna_dim': model.rna_dim, # Access from model attribute
+                'img_channels': model.img_channels, # Access from model attribute
+                'img_size': model.img_size, # Access from model attribute
+                # Add any other relevant config parameters stored in the model
+                # ...
+            }
+
             torch.save({
                 'model': model.state_dict(),
+                'config': model_config,
                 'optimizer': optimizer.state_dict(),
                 'lr_scheduler': lr_scheduler.state_dict(),
                 'epoch': epoch,

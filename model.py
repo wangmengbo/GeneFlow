@@ -78,6 +78,10 @@ class RNAtoHnEModel(nn.Module):
     ):
         super().__init__()
         
+        self.rna_dim = rna_dim
+        self.img_channels = img_channels
+        self.img_size = img_size
+        
         # RNA expression encoder
         self.rna_encoder = RNAEncoder(
             input_dim=rna_dim,
@@ -102,9 +106,6 @@ class RNAtoHnEModel(nn.Module):
             use_new_attention_order=use_new_attention_order,
             rna_embed_dim=model_channels * 4,
         )
-        
-        self.img_channels = img_channels
-        self.img_size = img_size
         
     def forward(self, x, t, rna_expr):
         """

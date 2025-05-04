@@ -21,7 +21,7 @@ from rectified_train import train_with_rectified_flow, generate_images_with_rect
 # sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # from ..utils import setup_parser, parse_adata
 # from .. import utils
-from utils import setup_parser, parse_adata
+from utils import setup_parser, parse_adata, analyze_gene_importance
 
 
 # Configure logging
@@ -48,7 +48,7 @@ def main():
     parser.add_argument('--img_channels', type=int, default=4, help='Number of image channels (3 for RGB, 1 Greyscale).')
     parser.add_argument('--use_amp', action='store_true', help='Use automatic mixed precision for training.')
     parser.add_argument('--patience', type=int, default=5, help='Early stopping patience.')
-    parser.add_argument('--gen_steps', type=int, default=100, help='Number of steps for Euler solver during generation.')
+    parser.add_argument('--gen_steps', type=int, default=100, help='Number of steps for solver during generation.')
     parser.add_argument('--seed', type=int, default=np.random.randint(100), help='Random seed for reproducibility.')
     parser = setup_parser(parser)
     args = parser.parse_args()
@@ -72,7 +72,8 @@ def main():
         logger.info(f"Loading gene expression data from {args.gene_expr}")
         expr_df = pd.read_csv(args.gene_expr, index_col=0)
     logger.info(f"Loaded gene expression data with shape: {expr_df.shape}")
-    
+    gene_names = expr_df.columns.tolist()
+
     # Load image paths
     logger.info(f"Loading image paths from {args.image_paths}")
     with open(args.image_paths, "r") as f:
@@ -133,7 +134,6 @@ def main():
         resblock_updown=True,
         use_new_attention_order=True,
     )
-    
     logger.info(f"Model initialized with gene dimension: {gene_dim}")
     
     # Initialize the rectified flow
@@ -142,28 +142,79 @@ def main():
     
     # Train model
     best_model_path = os.path.join(args.output_dir, "best_rna_to_hne_model_rectified.pt")
-    train_losses, val_losses = train_with_rectified_flow(
-        model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        rectified_flow=rectified_flow,
-        device=device,
-        num_epochs=args.epochs,
-        lr=args.lr,
-        best_model_path=best_model_path,
-        patience=args.patience,
-        use_amp=args.use_amp,
-        weight_decay=args.weight_decay
-    )
-    
-    logger.info(f"Training complete. Best model saved at {best_model_path}")
-    
+    if not args.only_inference:
+        train_losses, val_losses = train_with_rectified_flow(
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            rectified_flow=rectified_flow,
+            device=device,
+            num_epochs=args.epochs,
+            lr=args.lr,
+            best_model_path=best_model_path,
+            patience=args.patience,
+            use_amp=args.use_amp,
+            weight_decay=args.weight_decay
+        )
+        logger.info(f"Training complete. Best model saved at {best_model_path}")
+        
+        # Plot training curves
+        plt.figure(figsize=(10, 5))
+        plt.plot(train_losses, label='Train Loss')
+        plt.plot(val_losses, label='Validation Loss')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.title('Training and Validation Loss')
+        plt.legend()
+        plt.savefig(os.path.join(args.output_dir, "training_curves.png"))
+    else:
+        logger.info(f"Skipping training. Using existing model at {best_model_path}")
+
     # Load best model for evaluation
+    logger.info(f"Loading best model from {best_model_path}")
     checkpoint = torch.load(best_model_path, weights_only=True)
+    # # Check if config exists, otherwise assume args match saved model
+    # if 'config' in checkpoint:
+    #     model_config = checkpoint['config']
+    #     logger.info(f"Re-initializing model from saved config: {model_config}")
+    #     # Re-initialize model using saved config
+    #     model = RNAtoHnEModel(
+    #         rna_dim=model_config['rna_dim'],
+    #         img_channels=model_config['img_channels'],
+    #         img_size=model_config['img_size'],
+    #          # Add other relevant args from config if they were saved
+    #     )
+    # else:
+    #     logger.warning("Checkpoint does not contain 'config'. Assuming current args match saved model architecture.")
+    #     # Initialize with current args (ensure they match!)
+    #     model = RNAtoHnEModel(
+    #         rna_dim=gene_dim,
+    #         img_channels=args.img_channels,
+    #         img_size=args.img_size,
+    #         # ... other model params from args ...
+    #     )
     model.load_state_dict(checkpoint["model"])
+    model.to(device)
     
     # Generate images from validation set
     logger.info("Generating images from validation set...")
+    
+    importance_output_path = os.path.join(args.output_dir, "gene_importance_scores.csv")
+    analyze_gene_importance(
+        model=model,
+        data_loader=val_loader, # Use validation loader
+        rectified_flow=rectified_flow,
+        device=device,
+        gene_names=gene_names, # Pass the list of gene names
+        output_path=importance_output_path,
+        timesteps_to_analyze=args.analysis_timesteps,
+        num_batches_to_analyze=args.analysis_batches
+    )
+    logger.info(f"Gene importance scores saved to {importance_output_path}")
+
+    if args.only_importance_anlaysis:
+        logger.info("Skipping image generation as only importance analysis is requested.")
+        return
     
     # Create a subset of the validation set for visualization
     num_vis_samples = min(10, len(val_dataset))
@@ -265,16 +316,6 @@ def main():
 
     plt.tight_layout()
     plt.savefig(os.path.join(args.output_dir, "generation_results.png"))
-    
-    # Plot training curves
-    plt.figure(figsize=(10, 5))
-    plt.plot(train_losses, label='Train Loss')
-    plt.plot(val_losses, label='Validation Loss')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.title('Training and Validation Loss')
-    plt.legend()
-    plt.savefig(os.path.join(args.output_dir, "training_curves.png"))
     
     logger.info(f"Results saved to {args.output_dir}")
 
