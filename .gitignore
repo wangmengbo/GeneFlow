@@ -1,3 +1,5 @@
 cell_256_aux
 __pycache__
 *.pyc
+output.log
+output.txt
