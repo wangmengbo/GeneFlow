@@ -205,3 +205,164 @@ class CellImageGeneDataset(Dataset):
             'gene_mask': gene_mask,
             'image': image
         }
+
+def patch_collate_fn(batch):
+    """
+    Custom collate function for PatchImageGeneDataset
+    Handles variable numbers of cells per patch by keeping gene expressions as a list
+    """
+    patch_ids = [item['patch_id'] for item in batch]
+    # Collect all cell IDs, but don't try to batch them
+    all_cell_ids = [item['cell_ids'] for item in batch]
+    
+    # Stack images which should be the same size
+    images = torch.stack([item['image'] for item in batch])
+    
+    # Store gene expressions and num_cells separately
+    gene_exprs = [item['gene_expr'] for item in batch]
+    num_cells = [len(item['cell_ids']) for item in batch]
+    
+    # Handle gene masks if present
+    gene_masks = None
+    if 'gene_mask' in batch[0]:
+        gene_masks = [item.get('gene_mask', None) for item in batch]
+    
+    # Return a dict with batched tensors where possible, and lists otherwise
+    return {
+        'patch_id': patch_ids,
+        'cell_ids': all_cell_ids,
+        'gene_expr': gene_exprs,
+        'image': images,
+        'num_cells': num_cells,
+        'gene_mask': gene_masks
+    }
+
+class PatchImageGeneDataset(Dataset):
+    """Dataset for patch-level images and corresponding cell gene expression profiles"""
+    def __init__(self, expr_df, patch_image_paths, patch_to_cells, img_size=256, img_channels=3, transform=None):
+        """
+        Args:
+            expr_df: DataFrame with gene expression data (cells as index, genes as columns)
+            patch_image_paths: Dict/JSON mapping patch IDs to image paths
+            patch_to_cells: Dict/JSON mapping patch IDs to lists of cell IDs
+            img_size: Size to resize images to
+            img_channels: Number of image channels to use
+            transform: Optional transforms to apply to images
+        """
+        self.expr_df = expr_df
+        self.gene_list = expr_df.columns.tolist()
+        self.img_size = img_size
+        self.img_channels = img_channels
+        
+        # Load patch image paths
+        if isinstance(patch_image_paths, str):
+            with open(patch_image_paths, 'r') as f:
+                self.patch_image_paths = json.load(f)
+        else:
+            self.patch_image_paths = patch_image_paths
+            
+        # Load patch to cells mapping
+        if isinstance(patch_to_cells, str):
+            with open(patch_to_cells, 'r') as f:
+                self.patch_to_cells = json.load(f)
+        else:
+            self.patch_to_cells = patch_to_cells
+        
+        # Validate patches - only keep patches that have both image paths and cells in expression data
+        self.valid_patches = []
+        all_cells = set(self.expr_df.index)
+        
+        for patch_id, cells in self.patch_to_cells.items():
+            if (patch_id in self.patch_image_paths and
+                all(cell in all_cells for cell in cells)):
+                self.valid_patches.append(patch_id)
+        
+        logger.info(f"Dataset contains {len(self.valid_patches)} valid patches")
+        logger.info(f"Total number of cells across all patches: {sum(len(self.patch_to_cells[p]) for p in self.valid_patches)}")
+        
+        # Set up image transforms
+        if transform is None:
+            self.transform = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Resize((img_size, img_size), antialias=True),
+            ])
+        else:
+            self.transform = transform
+
+    def __len__(self):
+        return len(self.valid_patches)
+    
+    def __getitem__(self, idx):
+        patch_id = self.valid_patches[idx]
+        cell_ids = self.patch_to_cells[patch_id]
+        
+        # Get gene expression data for all cells in this patch
+        gene_exprs = torch.stack([
+            torch.tensor(self.expr_df.loc[cell_id].values, dtype=torch.float32)
+            for cell_id in cell_ids
+        ])
+        
+        # Load and preprocess the patch image
+        img_path = self.patch_image_paths[patch_id]
+        image = self._load_image(img_path)
+        
+        return {
+            'patch_id': patch_id,
+            'cell_ids': cell_ids,
+            'gene_expr': gene_exprs,
+            'image': image,
+            'num_cells': len(cell_ids)
+        }
+        
+    def _load_image(self, img_path):
+        """Load and preprocess an image with support for multi-channel images"""
+        try:
+            # Try to open as TIFF first
+            image = tifffile.imread(img_path)
+            
+            # Handle channel dimensions if needed
+            if len(image.shape) == 3 and image.shape[0] < 10:  # Likely channel-first format
+                image = np.transpose(image, (1, 2, 0))
+            
+            # Remove singleton dimensions
+            if len(image.shape) > 2 and 1 in image.shape:
+                image = np.squeeze(image)
+            
+            # Process multi-channel images
+            if len(image.shape) == 3:
+                # Limit to requested channels if needed
+                if image.shape[2] > self.img_channels:
+                    image = image[:, :, :self.img_channels]
+                
+                # Normalize 16-bit images to 8-bit
+                if image.dtype == np.uint16:
+                    image = ((image - np.min(image) + 0.0001) / (np.max(image) - np.min(image) + 0.0001))
+                    image = (image * 255).astype(np.uint8)
+                
+                # Convert to PIL image for transforms
+                pil_img = PILImage.fromarray(image)
+                
+            elif len(image.shape) == 2:  # Grayscale
+                # Normalize 16-bit images to 8-bit
+                if image.dtype == np.uint16:
+                    image = ((image - np.min(image) + 0.0001) / (np.max(image) - np.min(image) + 0.0001))
+                    image = (image * 255).astype(np.uint8)
+                
+                # Convert to PIL image
+                pil_img = PILImage.fromarray(image, mode='L')
+                
+                # Convert to RGB if needed
+                if self.img_channels == 3:
+                    pil_img = pil_img.convert('RGB')
+            
+            # Apply transforms
+            if self.transform:
+                image = self.transform(pil_img)
+                
+        except Exception as e:
+            logger.error(f"Error loading image {img_path}: {e}")
+            # Create a blank image as fallback
+            channels = self.img_channels if self.img_channels else 3
+            image = torch.zeros(channels, self.img_size, self.img_size)
+        
+        return image

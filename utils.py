@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 def setup_parser(parser=None):
     if parser is None:
         parser = argparse.ArgumentParser(description="A tool for generating and managing prompts.")
-    parser.add_argument("--adata", type=str, required=True, help="Path to the AnnData object.")
+    parser.add_argument("--adata", type=str, default="cell_256_aux/input/adata.h5ad", help="Path to the AnnData object.")
     parser.add_argument("--layer", type=str, default=None, help="Layer to use for the AnnData object.")
     parser.add_argument("--cell_type", type=str, default=None)
     parser.add_argument("--cell_type_label", type=str, default="cell_type")
