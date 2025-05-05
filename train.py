@@ -91,8 +91,12 @@ def train_with_rectified_flow(
         
         for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} - Training"):
             gene_expr = batch['gene_expr'].to(device)
-            gene_mask = batch['gene_mask'].to(device)
             target_images = batch['image'].to(device)
+
+            # Handle gene mask if present, otherwise set to None
+            gene_mask = batch.get('gene_mask', None)
+            if gene_mask is not None:
+                gene_mask = gene_mask.to(device)
 
             # Get number of cells if using multi-cell model
             num_cells = None
@@ -108,13 +112,15 @@ def train_with_rectified_flow(
             target_velocity = path_sample["velocity"]
             
             # Predict vector field with mixed precision
-            with torch.amp.autocast('cuda',enabled=use_amp):
+            with torch.amp.autocast('cuda', enabled=use_amp):
                 # Pass num_cells if using multi-cell model
                 if is_multi_cell:
                     v_pred = model(x_t, t, gene_expr, num_cells, gene_mask)
+                    l1_penalty = torch.sum(torch.abs(model.rna_encoder.cell_encoder[0].weight)) * 0.001
                 else:
                     v_pred = model(x_t, t, gene_expr, gene_mask)
-                l1_penalty = torch.sum(torch.abs(model.rna_encoder.encoder[0].weight)) * 0.001
+                    l1_penalty = torch.sum(torch.abs(model.rna_encoder.encoder[0].weight)) * 0.001
+                
                 loss = rectified_flow.loss_fn(v_pred, target_velocity) + l1_penalty
             
             # Backpropagation with loss scaling
@@ -142,8 +148,17 @@ def train_with_rectified_flow(
         with torch.no_grad():
             for batch in tqdm(val_loader, desc=f"Epoch {epoch+1}/{num_epochs} - Validation"):
                 gene_expr = batch['gene_expr'].to(device)
-                gene_mask = batch['gene_mask'].to(device)
                 target_images = batch['image'].to(device)
+                
+                # Handle gene mask if present, otherwise set to None
+                gene_mask = batch.get('gene_mask', None)
+                if gene_mask is not None:
+                    gene_mask = gene_mask.to(device)
+                
+                # Get number of cells if using multi-cell model
+                num_cells = None
+                if is_multi_cell and 'num_cells' in batch:
+                    num_cells = batch['num_cells']
                 
                 # Sample random times
                 t = torch.rand(gene_expr.shape[0], device=device)
@@ -155,8 +170,14 @@ def train_with_rectified_flow(
                 
                 # Predict vector field
                 with torch.amp.autocast('cuda', enabled=use_amp):
-                    v_pred = model(x_t, t, gene_expr, gene_mask) # <-- Pass both tensors
-                    l1_penalty = torch.sum(torch.abs(model.rna_encoder.encoder[0].weight)) * 0.001
+                    # Use same approach as training - handle multi-cell case
+                    if is_multi_cell:
+                        v_pred = model(x_t, t, gene_expr, num_cells, gene_mask)
+                        l1_penalty = torch.sum(torch.abs(model.rna_encoder.cell_encoder[0].weight)) * 0.001
+                    else:
+                        v_pred = model(x_t, t, gene_expr, gene_mask)
+                        l1_penalty = torch.sum(torch.abs(model.rna_encoder.encoder[0].weight)) * 0.001
+                        
                     loss = rectified_flow.loss_fn(v_pred, target_velocity) + l1_penalty
                 
                 val_loss_metric.update(loss)
@@ -174,11 +195,9 @@ def train_with_rectified_flow(
             best_val_loss = val_loss
 
             model_config = {
-                'rna_dim': model.rna_dim, # Access from model attribute
-                'img_channels': model.img_channels, # Access from model attribute
-                'img_size': model.img_size, # Access from model attribute
-                # Add any other relevant config parameters stored in the model
-                # ...
+                'rna_dim': model.rna_dim,
+                'img_channels': model.img_channels,
+                'img_size': model.img_size,
             }
 
             torch.save({
@@ -210,11 +229,25 @@ def generate_images_with_rectified_flow(
     gene_expr, 
     device, 
     num_steps=100,
+    gene_mask=None,
     num_cells=None,
     is_multi_cell=False
 ):
     """
-    Generate cell images from gene expression profiles using rectified flow and euler solver
+    Generate cell images from gene expression profiles using rectified flow and DOPRI5 solver
+    
+    Args:
+        model: The RNA to H&E model
+        rectified_flow: The rectified flow module
+        gene_expr: RNA expression tensor
+        device: Computation device
+        num_steps: Number of steps for the solver
+        gene_mask: Optional gene mask tensor
+        num_cells: Optional number of cells per patch for multi-cell model
+        is_multi_cell: Whether using multi-cell model
+        
+    Returns:
+        Generated images tensor
     """
     # Create the solver with modified forward method for multi-cell model
     if is_multi_cell:
@@ -225,12 +258,24 @@ def generate_images_with_rectified_flow(
                 self.img_size = model.img_size
                 
             def __call__(self, x, t, rna_expr):
-                return self.model(x, t, rna_expr, num_cells)
+                # Forward gene_mask as None if not provided
+                return self.model(x, t, rna_expr, num_cells, gene_mask)
                 
         model_wrapper = MultiCellModelWrapper(model)
         solver = DOPRI5Solver(model_wrapper, rectified_flow)
     else:
-        solver = DOPRI5Solver(model, rectified_flow)
+        # For single-cell model, use standard wrapper
+        class SingleCellModelWrapper:
+            def __init__(self, model):
+                self.model = model
+                self.img_channels = model.img_channels
+                self.img_size = model.img_size
+                
+            def __call__(self, x, t, rna_expr):
+                return self.model(x, t, rna_expr, gene_mask)
+                
+        model_wrapper = SingleCellModelWrapper(model)
+        solver = DOPRI5Solver(model_wrapper, rectified_flow)
     
     # Generate images
     generated_images = solver.generate_sample(

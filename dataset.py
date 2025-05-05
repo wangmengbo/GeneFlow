@@ -207,34 +207,34 @@ class CellImageGeneDataset(Dataset):
         }
 
 def patch_collate_fn(batch):
-    """
-    Custom collate function for PatchImageGeneDataset
-    Handles variable numbers of cells per patch by keeping gene expressions as a list
-    """
     patch_ids = [item['patch_id'] for item in batch]
-    # Collect all cell IDs, but don't try to batch them
-    all_cell_ids = [item['cell_ids'] for item in batch]
-    
-    # Stack images which should be the same size
+    cell_ids_list = [item['cell_ids'] for item in batch]
     images = torch.stack([item['image'] for item in batch])
+    num_cells = [item['num_cells'] for item in batch]
     
-    # Store gene expressions and num_cells separately
     gene_exprs = [item['gene_expr'] for item in batch]
-    num_cells = [len(item['cell_ids']) for item in batch]
+    gene_dim = gene_exprs[0].shape[1]
     
-    # Handle gene masks if present
-    gene_masks = None
-    if 'gene_mask' in batch[0]:
-        gene_masks = [item.get('gene_mask', None) for item in batch]
+    # Validate num_cells
+    for i, (expr, n_cells) in enumerate(zip(gene_exprs, num_cells)):
+        if expr.shape[0] != n_cells:
+            logger.error(f"Sample {i} (patch {patch_ids[i]}): num_cells={n_cells}, but gene_expr has {expr.shape[0]} cells")
+            raise ValueError(f"Sample {i} (patch {patch_ids[i]}): num_cells={n_cells}, but gene_expr has {expr.shape[0]} cells")
     
-    # Return a dict with batched tensors where possible, and lists otherwise
+    max_cells = max(num_cells)
+    batch_size = len(batch)
+    padded_gene_exprs = torch.zeros(batch_size, max_cells, gene_dim, dtype=gene_exprs[0].dtype)
+    
+    for i, expr in enumerate(gene_exprs):
+        n_cells = num_cells[i]
+        padded_gene_exprs[i, :n_cells] = expr
+    
     return {
         'patch_id': patch_ids,
-        'cell_ids': all_cell_ids,
-        'gene_expr': gene_exprs,
+        'cell_ids': cell_ids_list,
+        'gene_expr': padded_gene_exprs,
         'image': images,
-        'num_cells': num_cells,
-        'gene_mask': gene_masks
+        'num_cells': torch.tensor(num_cells)
     }
 
 class PatchImageGeneDataset(Dataset):
@@ -302,6 +302,12 @@ class PatchImageGeneDataset(Dataset):
             for cell_id in cell_ids
         ])
         
+        # Validate num_cells
+        num_cells = len(cell_ids)
+        if gene_exprs.shape[0] != num_cells:
+            logger.error(f"Patch {patch_id}: num_cells={num_cells}, but gene_exprs has {gene_exprs.shape[0]} cells")
+            raise ValueError(f"Patch {patch_id}: num_cells={num_cells}, but gene_exprs has {gene_exprs.shape[0]} cells")
+        
         # Load and preprocess the patch image
         img_path = self.patch_image_paths[patch_id]
         image = self._load_image(img_path)
@@ -311,7 +317,7 @@ class PatchImageGeneDataset(Dataset):
             'cell_ids': cell_ids,
             'gene_expr': gene_exprs,
             'image': image,
-            'num_cells': len(cell_ids)
+            'num_cells': num_cells
         }
         
     def _load_image(self, img_path):

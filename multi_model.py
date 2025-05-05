@@ -222,24 +222,35 @@ def prepare_multicell_batch(batch, device):
     Returns:
         Dictionary with model-ready tensors
     """
-    # Move tensors to device
     images = batch['image'].to(device)
-    
-    # Get number of cells per sample in batch
-    batch_size = len(batch['num_cells'])
     num_cells = batch['num_cells']
     
-    # Pad gene expression tensors to max number of cells
-    max_cells = max(num_cells)
-    gene_dim = batch['gene_expr'][0].shape[1]  # Get number of genes
-    
-    # Initialize padded tensor
-    padded_gene_expr = torch.zeros(batch_size, max_cells, gene_dim, device=device)
-    
-    # Fill with actual data
-    for i, sample_gene_expr in enumerate(batch['gene_expr']):
-        cells_count = num_cells[i]
-        padded_gene_expr[i, :cells_count] = sample_gene_expr
+    # Check if gene_expr is already a padded tensor (from patch_collate_fn)
+    gene_expr = batch['gene_expr']
+    if isinstance(gene_expr, torch.Tensor):
+        # gene_expr is already padded [batch_size, max_cells, gene_dim]
+        padded_gene_expr = gene_expr.to(device)
+        batch_size, max_cells, gene_dim = padded_gene_expr.shape
+        
+        # Validate num_cells
+        for i, n_cells in enumerate(num_cells):
+            if n_cells > max_cells:
+                logger.error(f"Sample {i}: num_cells={n_cells} exceeds max_cells={max_cells}")
+                raise ValueError(f"Sample {i}: num_cells={n_cells} exceeds max_cells={max_cells}")
+    else:
+        # Fallback: pad gene_expr manually (for compatibility with older code)
+        logger.warning("gene_expr is a list; padding manually")
+        batch_size = len(num_cells)
+        max_cells = max(num_cells)
+        gene_dim = gene_expr[0].shape[1]
+        padded_gene_expr = torch.zeros(batch_size, max_cells, gene_dim, device=device)
+        
+        for i, sample_gene_expr in enumerate(gene_expr):
+            cells_count = sample_gene_expr.shape[0]
+            if cells_count != num_cells[i]:
+                logger.error(f"Mismatch in sample {i}: num_cells={num_cells[i]}, but gene_expr has {cells_count} cells")
+                raise ValueError(f"Mismatch in sample {i}: num_cells={num_cells[i]}, but gene_expr has {cells_count} cells")
+            padded_gene_expr[i, :cells_count] = sample_gene_expr.to(device)
     
     return {
         'image': images,

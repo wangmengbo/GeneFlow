@@ -294,7 +294,21 @@ def main():
     num_vis_samples = min(10, len(val_dataset))
     vis_indices = torch.randperm(len(val_dataset))[:num_vis_samples]
     vis_dataset = torch.utils.data.Subset(val_dataset, vis_indices)
-    vis_loader = DataLoader(vis_dataset, batch_size=num_vis_samples, shuffle=False)
+
+    # Use the appropriate collate function based on model type
+    if args.model_type == 'multi':
+        vis_loader = DataLoader(
+            vis_dataset, 
+            batch_size=num_vis_samples, 
+            shuffle=False,
+            collate_fn=patch_collate_fn  # Use the same custom collate function
+        )
+    else:
+        vis_loader = DataLoader(
+            vis_dataset, 
+            batch_size=num_vis_samples, 
+            shuffle=False
+        )
 
     # Get a batch of data
     batch = next(iter(vis_loader))
