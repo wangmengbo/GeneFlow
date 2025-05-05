@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 class CellImageGeneDataset(Dataset):
     """Dataset for cell images and gene expression profiles with improved preprocessing"""
-    def __init__(self, expr_df, image_paths, img_size=256, img_channels=3, transform=None):
+    def __init__(self, expr_df, image_paths, img_size=256, img_channels=3, transform=None, missing_gene_symbols=None):
         """
         Args:
             expr_df: DataFrame with gene expression data (genes as rows, cells as columns)
@@ -29,7 +29,8 @@ class CellImageGeneDataset(Dataset):
             transform: Optional transforms to apply to images
         """
         self.expr_df = expr_df
-        
+        self.gene_list = expr_df.columns.tolist()
+
         # Load image paths
         if isinstance(image_paths, str):
             with open(image_paths, 'r') as f:
@@ -53,7 +54,17 @@ class CellImageGeneDataset(Dataset):
             ])
         else:
             self.transform = transform
+        
+        self.missing_gene_symbols = missing_gene_symbols
+        self.missing_gene_indices = {gene: idx for idx, gene in enumerate(self.gene_list) 
+                                     if gene in self.missing_gene_symbols}
             
+        if self.missing_gene_indices:
+            logger.info(f"Initialized dataset with {len(self.missing_gene_indices)} missing gene indices identified.")
+        else:
+            logger.info("Initialized dataset with no missing gene symbols provided or found in data.")
+        
+                        
     def __len__(self):
         return len(self.cell_ids)
     
@@ -62,6 +73,14 @@ class CellImageGeneDataset(Dataset):
         
         # Get gene expression data
         gene_expr = self.expr_df.loc[cell_id].values.astype(np.float32)
+
+        # Handle missing genes
+        gene_mask = np.ones_like(gene_expr)
+        # If there are known missing genes, set corresponding mask indices to 0
+        if self.missing_gene_indices:
+            indices_to_zero = list(self.missing_gene_indices.values())
+            if indices_to_zero: # Ensure list is not empty
+                gene_mask[indices_to_zero] = 0
         
         # Load and preprocess image
         img_path = self.image_paths[cell_id]
@@ -183,5 +202,6 @@ class CellImageGeneDataset(Dataset):
         return {
             'cell_id': cell_id,
             'gene_expr': gene_expr,
+            'gene_mask': gene_mask,
             'image': image
         }

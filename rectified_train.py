@@ -91,8 +91,9 @@ def train_with_rectified_flow(
         
         for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} - Training"):
             gene_expr = batch['gene_expr'].to(device)
+            gene_mask = batch['gene_mask'].to(device)
             target_images = batch['image'].to(device)
-            
+
             # Sample random times
             t = torch.rand(gene_expr.shape[0], device=device)
             
@@ -103,7 +104,7 @@ def train_with_rectified_flow(
             
             # Predict vector field with mixed precision
             with torch.amp.autocast('cuda',enabled=use_amp):
-                v_pred = model(x_t, t, gene_expr)
+                v_pred = model(x_t, t, gene_expr, gene_mask) # <-- Pass both tensors
                 l1_penalty = torch.sum(torch.abs(model.rna_encoder.encoder[0].weight)) * 0.001
                 loss = rectified_flow.loss_fn(v_pred, target_velocity) + l1_penalty
             
@@ -132,6 +133,7 @@ def train_with_rectified_flow(
         with torch.no_grad():
             for batch in tqdm(val_loader, desc=f"Epoch {epoch+1}/{num_epochs} - Validation"):
                 gene_expr = batch['gene_expr'].to(device)
+                gene_mask = batch['gene_mask'].to(device)
                 target_images = batch['image'].to(device)
                 
                 # Sample random times
@@ -144,7 +146,7 @@ def train_with_rectified_flow(
                 
                 # Predict vector field
                 with torch.amp.autocast('cuda', enabled=use_amp):
-                    v_pred = model(x_t, t, gene_expr)
+                    v_pred = model(x_t, t, gene_expr, gene_mask) # <-- Pass both tensors
                     l1_penalty = torch.sum(torch.abs(model.rna_encoder.encoder[0].weight)) * 0.001
                     loss = rectified_flow.loss_fn(v_pred, target_velocity) + l1_penalty
                 

@@ -67,9 +67,9 @@ def main():
     # Load gene expression data
     if args.adata is not None:
         logger.info(f"Loading AnnData from {args.adata}")
-        expr_df, _ = parse_adata(args)
+        expr_df, missing_gene_symbols = parse_adata(args)
     else:
-        logger.info(f"Loading gene expression data from {args.gene_expr}")
+        logger.warning(f"(deprecated) Loading gene expression data from {args.gene_expr}")
         expr_df = pd.read_csv(args.gene_expr, index_col=0)
     logger.info(f"Loaded gene expression data with shape: {expr_df.shape}")
     gene_names = expr_df.columns.tolist()
@@ -89,7 +89,8 @@ def main():
         transform=transforms.Compose([
             transforms.ToTensor(),
             transforms.Resize((args.img_size, args.img_size), antialias=True),
-        ])
+        ]),
+        missing_gene_symbols=missing_gene_symbols,
     )
     
     # Split into train and validation sets
@@ -133,6 +134,7 @@ def main():
         use_scale_shift_norm=True,
         resblock_updown=True,
         use_new_attention_order=True,
+        concat_mask=args.concat_mask,
     )
     logger.info(f"Model initialized with gene dimension: {gene_dim}")
     

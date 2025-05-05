@@ -22,13 +22,19 @@ class RNAEncoder(nn.Module):
     """
     Encoder for RNA expression data that produces embeddings for conditioning the UNet.
     """
-    def __init__(self, input_dim, hidden_dims=[512, 256], output_dim=128):
+    def __init__(self, input_dim, hidden_dims=[512, 256], output_dim=128, concat_mask=False):
         super().__init__()
         # Add attention weights for genes
         self.gene_attention = nn.Parameter(torch.ones(input_dim) / input_dim)
         # Rest of encoder remains the same
         layers = []
-        prev_dim = input_dim
+
+        if concat_mask:
+            self.concat_mask = True
+            first_layer_input_dim = input_dim * 2
+            prev_dim = first_layer_input_dim
+        else:
+            prev_dim = input_dim
         
         for hidden_dim in hidden_dims:
             layers.append(nn.Linear(prev_dim, hidden_dim))
@@ -39,10 +45,12 @@ class RNAEncoder(nn.Module):
         layers.append(nn.Linear(prev_dim, output_dim))
         self.encoder = nn.Sequential(*layers)
         
-    def forward(self, x):
+    def forward(self, x, mask=None):
         # Apply attention to genes
         attention = F.softmax(self.gene_attention, dim=0)
         x_weighted = x * attention
+        if mask is not None and self.concat_mask:
+            x_weighted = torch.cat((x_weighted, mask.to(x_weighted.dtype)), dim=1)
         return self.encoder(x_weighted)
         
     def get_gene_importance(self):
@@ -75,18 +83,20 @@ class RNAtoHnEModel(nn.Module):
         use_scale_shift_norm=True,
         resblock_updown=True,
         use_new_attention_order=True,
+        concat_mask=False,
     ):
         super().__init__()
         
         self.rna_dim = rna_dim
         self.img_channels = img_channels
         self.img_size = img_size
-        
+
         # RNA expression encoder
         self.rna_encoder = RNAEncoder(
             input_dim=rna_dim,
             hidden_dims=[512, 256],
-            output_dim=model_channels * 4  # Match time_embed_dim
+            output_dim=model_channels * 4,  # Match time_embed_dim
+            concat_mask=concat_mask,
         )
         
         # UNet model for flow matching
@@ -107,7 +117,7 @@ class RNAtoHnEModel(nn.Module):
             rna_embed_dim=model_channels * 4,
         )
         
-    def forward(self, x, t, rna_expr):
+    def forward(self, x, t, gene_expr, gene_mask=None):
         """
         Forward pass for the RNA to H&E model
         
@@ -120,7 +130,7 @@ class RNAtoHnEModel(nn.Module):
             Predicted velocity field for the flow matching model
         """
         # Encode RNA expression
-        rna_embedding = self.rna_encoder(rna_expr)
+        rna_embedding = self.rna_encoder(gene_expr, mask=gene_mask)
         
         # Get vector field from UNet model
         return self.unet(x, t, extra={"rna_embedding": rna_embedding})
