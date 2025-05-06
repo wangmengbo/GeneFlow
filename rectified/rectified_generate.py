@@ -2,22 +2,21 @@ import os
 import sys
 import json
 import torch
+import logging
 import argparse
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import logging
-from torch.utils.data import DataLoader
 from torchvision import transforms
+from torch.utils.data import Dataset, DataLoader
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.single_model import RNAtoHnEModel
-from baseline.diffusion import GaussianDiffusion
 from rectified.rectified_flow import RectifiedFlow
+from src.utils import setup_parser, parse_adata
 from src.multi_model import MultiCellRNAtoHnEModel, prepare_multicell_batch
 from src.dataset import CellImageGeneDataset, PatchImageGeneDataset, patch_collate_fn
-from baseline.diffusion_train import generate_images_with_rectified_flow, generate_images_with_diffusion
-from src.utils import setup_parser, parse_adata, analyze_gene_importance, analyze_gene_importance_diffusion
+from rectified.rectified_train import generate_images_with_rectified_flow
 
 # Configure logging
 logging.basicConfig(
@@ -27,32 +26,32 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate RNA to H&E cell image generator with saved model.")
-    parser.add_argument('--model_path', type=str, default='/home/verma198/Public/hne/cell_256_aux/output_rectified/best_multi_rna_to_hne_model_diffusion.pt', help='Path to saved model checkpoint.')
+    parser = argparse.ArgumentParser(description="Generate images using pretrained RNA to H&E model with Rectified Flow.")
+    parser.add_argument('--model_path', type=str, default="cell_256_aux/output_rectified/best_single_rna_to_hne_model_rectified-multihead1.pt", help='Path to the pretrained model.')
     parser.add_argument('--gene_expr', type=str, default="cell_256_aux/normalized.csv", help='Path to gene expression CSV file.')
     parser.add_argument('--image_paths', type=str, default="cell_256_aux/input/cell_image_paths.json", help='Path to JSON file with image paths.')
     parser.add_argument('--patch_image_paths', type=str, default="cell_256_aux/input/patch_image_paths.json", help='Path to JSON file with patch paths.')
     parser.add_argument('--patch_cell_mapping', type=str, default="cell_256_aux/input/patch_cell_mapping.json", help='Path to JSON file with mapping paths.')
-    parser.add_argument('--output_dir', type=str, default='cell_256_aux/evaluation_output', help='Directory to save outputs.')
-    parser.add_argument('--batch_size', type=int, default=6, help='Batch size for evaluation.')
+    parser.add_argument('--output_dir', type=str, default='cell_256_aux/output_rectified', help='Directory to save outputs.')
+    parser.add_argument('--epochs', type=int, default=10, help='Number of training epochs.')
+    parser.add_argument('--batch_size', type=int, default=6, help='Batch size for training and evaluation.')
+    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate for optimizer.')
+    parser.add_argument('--weight_decay', type=float, default=0.01, help='Weight decay for optimizer.')
     parser.add_argument('--img_size', type=int, default=256, help='Size of the generated images.')
-    parser.add_argument('--img_channels', type=int, default=4, help='Number of image channels (3 for RGB, 1 for auxiliary).')
+    parser.add_argument('--img_channels', type=int, default=4, help='Number of image channels (3 for RGB, 1 Greyscale).')
+    parser.add_argument('--use_amp', action='store_true', help='Use automatic mixed precision for training.')
+    parser.add_argument('--patience', type=int, default=5, help='Early stopping patience.')
     parser.add_argument('--gen_steps', type=int, default=100, help='Number of steps for solver during generation.')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility.')
-    parser.add_argument('--model_type', type=str, choices=['single', 'multi'], default='multi', help='Type of model to use: single-cell or multi-cell')
-    parser.add_argument('--method', type=str, choices=['diffusion', 'rectified_flow'], default='diffusion',help='Generation method: diffusion or rectified flow')
+    parser.add_argument('--model_type', type=str, choices=['single', 'multi'], default='single', help='Type of model to use: single-cell or multi-cell')
     parser.add_argument('--normalize_aux', action='store_true', help='Normalize auxiliary channels.')
     parser.add_argument('--num_samples', type=int, default=10, help='Number of samples to generate.')
-    parser.add_argument('--analysis', action='store_true', help='Perform gene importance analysis.')
-    parser.add_argument('--diffusion_timesteps', type=int, default=1000, help='Number of timesteps for diffusion process')
-    parser.add_argument('--beta_schedule', type=str, choices=['linear', 'cosine'], default='cosine', help='Noise schedule for diffusion')
-    parser.add_argument('--predict_noise', action='store_true', help='Whether model predicts noise (True) or x_0 (False)')
-    parser.add_argument('--sampling_method', type=str, choices=['ddpm', 'ddim'], default='ddim', help='Sampling method for diffusion generation')
     parser = setup_parser(parser)
     args = parser.parse_args()
 
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(os.path.join(args.output_dir, "generated_images"), exist_ok=True)
 
     # Set device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -61,7 +60,7 @@ def main():
     # Set random seed for reproducibility
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
-    
+
     # Load gene expression data
     if args.adata is not None:
         logger.info(f"Loading AnnData from {args.adata}")
@@ -76,20 +75,23 @@ def main():
     if args.model_type == 'single':
         logger.info("Creating single-cell dataset")
 
-        # Load image paths
-        logger.info(f"Loading image paths from {args.image_paths}")
-        with open(args.image_paths, "r") as f:
-            image_paths = json.load(f)
-        logger.info(f"Loaded {len(image_paths)} cell image paths")
+        # Load image paths if provided (for visualization)
+        if args.image_paths:
+            logger.info(f"Loading image paths from {args.image_paths}")
+            with open(args.image_paths, "r") as f:
+                image_paths = json.load(f)
+            logger.info(f"Loaded {len(image_paths)} cell image paths")
 
-        # Filter out non-existent image paths
-        image_paths_tmp = {}
-        for k, v in image_paths.items():
-            if os.path.exists(v):
-                image_paths_tmp[k] = v
-        
-        image_paths = image_paths_tmp
-        logger.info(f"After filtering, using {len(image_paths)} valid image paths")
+            # Filter out non-existent files
+            image_paths_tmp = {}
+            for k,v in image_paths.items():
+                if os.path.exists(v):
+                    image_paths_tmp[k] = v
+            
+            image_paths = image_paths_tmp
+            logger.info(f"After filtering: {len(image_paths)} valid cell image paths")
+        else:
+            image_paths = {}
         
         dataset = CellImageGeneDataset(
             expr_df, 
@@ -116,13 +118,13 @@ def main():
             with open(args.patch_image_paths, "r") as f:
                 patch_image_paths = json.load(f)
 
-            # Filter out non-existent image paths
+            # Filter out non-existent files
             patch_image_paths_tmp = {}
-            for k, v in patch_image_paths.items():
+            for k,v in patch_image_paths.items():
                 if os.path.exists(v):
                     patch_image_paths_tmp[k] = v
             patch_image_paths = patch_image_paths_tmp
-            logger.info(f"After filtering, using {len(patch_image_paths)} valid patch image paths")
+            logger.info(f"After filtering: {len(patch_image_paths)} valid patch image paths")
         else:
             patch_image_paths = None
             
@@ -139,13 +141,12 @@ def main():
             normalize_aux=args.normalize_aux,
         )
     
-    # Create evaluation dataset (using the full dataset for evaluation)
-    eval_dataset = dataset
+    logger.info(f"Dataset created with {len(dataset)} samples")
     
-    # Use random subset for visualization
-    num_vis_samples = min(args.num_samples, len(eval_dataset))
-    vis_indices = torch.randperm(len(eval_dataset))[:num_vis_samples]
-    vis_dataset = torch.utils.data.Subset(eval_dataset, vis_indices)
+    # Create a subset of the dataset for generating images
+    num_vis_samples = min(args.num_samples, len(dataset))
+    vis_indices = torch.randperm(len(dataset))[:num_vis_samples]
+    vis_dataset = torch.utils.data.Subset(dataset, vis_indices)
 
     # Use the appropriate collate function based on model type
     if args.model_type == 'multi':
@@ -155,31 +156,14 @@ def main():
             shuffle=False,
             collate_fn=patch_collate_fn
         )
-        # Also create a dataloader for gene importance analysis if needed
-        if args.analysis:
-            eval_loader = DataLoader(
-                eval_dataset, 
-                batch_size=args.batch_size, 
-                shuffle=False,
-                collate_fn=patch_collate_fn
-            )
     else:
         vis_loader = DataLoader(
             vis_dataset, 
             batch_size=num_vis_samples, 
             shuffle=False
         )
-        # Also create a dataloader for gene importance analysis if needed
-        if args.analysis:
-            eval_loader = DataLoader(
-                eval_dataset, 
-                batch_size=args.batch_size, 
-                shuffle=False
-            )
     
-    logger.info(f"Evaluation set size: {len(eval_dataset)}, Visualization samples: {num_vis_samples}")
-    
-    # Initialize appropriate model
+    # Initialize appropriate model based on model type
     gene_dim = expr_df.shape[1]  # Number of genes
     
     if args.model_type == 'single':
@@ -221,123 +205,63 @@ def main():
             concat_mask=args.concat_mask if hasattr(args, 'concat_mask') else False,
         )
     
-    # Load the saved model
-    logger.info(f"Loading model from {args.model_path}")
-    checkpoint = torch.load(args.model_path, map_location=device)
+    # Load the pretrained model
+    logger.info(f"Loading pretrained model from {args.model_path}")
+    checkpoint = torch.load(args.model_path, weights_only=True)
     model.load_state_dict(checkpoint["model"])
     model.to(device)
-    model.eval()
+    model.eval()  # Set to evaluation mode
     
-    # Initialize the appropriate flow model
-    if args.method == 'rectified_flow':
-        logger.info("Initializing rectified flow")
-        flow_model = RectifiedFlow(sigma_min=0.002, sigma_max=80.0)
-    else:  # diffusion
-        logger.info("Initializing diffusion model")
-        flow_model = GaussianDiffusion(
-            timesteps=args.diffusion_timesteps,
-            beta_schedule=args.beta_schedule,
-            predict_noise=args.predict_noise,
-            device=device
-        )
+    # Initialize the rectified flow
+    rectified_flow = RectifiedFlow(sigma_min=0.002, sigma_max=80.0)
+    logger.info("Initialized rectified flow")
     
-    # Perform gene importance analysis if requested
-    if args.analysis and args.model_type == 'single':
-        importance_output_path = os.path.join(args.output_dir, "gene_importance_scores.csv")
-        logger.info(f"Performing gene importance analysis...")
-        
-        if args.method == 'diffusion':
-            analyze_gene_importance_diffusion(
-                model=model,
-                data_loader=eval_loader,
-                diffusion=flow_model,
-                device=device,
-                gene_names=gene_names,
-                output_path=importance_output_path,
-                timesteps_to_analyze=args.analysis_timesteps if hasattr(args, 'analysis_timesteps') else None,
-                num_batches_to_analyze=args.analysis_batches if hasattr(args, 'analysis_batches') else None
-            )
-        else:  # rectified_flow
-            analyze_gene_importance(
-                model=model,
-                data_loader=eval_loader,
-                rectified_flow=flow_model,
-                device=device,
-                gene_names=gene_names,
-                output_path=importance_output_path,
-                num_batches_to_analyze=args.analysis_batches if hasattr(args, 'analysis_batches') else None
-            )
-        logger.info(f"Gene importance scores saved to {importance_output_path}")
-    
-    # Get a batch of data for generation
+    # Get a batch of data
     batch = next(iter(vis_loader))
-
-    # Generate images based on model type and method
-    with torch.no_grad():
-        if args.model_type == 'single':
-            gene_expr = batch['gene_expr'].to(device)
-            real_images = batch['image']
-            cell_ids = batch['cell_id']
-            gene_mask = batch.get('gene_mask', None)
-            if gene_mask is not None:
-                gene_mask = gene_mask.to(device)
-            
-            if args.method == 'diffusion':
-                logger.info("Generating images with diffusion...")
-                generated_images = generate_images_with_diffusion(
-                    model=model,
-                    diffusion=flow_model,
-                    gene_expr=gene_expr,
-                    device=device,
-                    num_steps=args.gen_steps,
-                    gene_mask=gene_mask,
-                    is_multi_cell=False,
-                    method=args.sampling_method
-                )
-            else:  # rectified_flow
-                logger.info("Generating images with rectified flow...")
-                generated_images = generate_images_with_rectified_flow(
-                    model=model,
-                    rectified_flow=flow_model,
-                    gene_expr=gene_expr,
-                    device=device,
-                    num_steps=args.gen_steps,
-                    gene_mask=gene_mask
-                )
-        else:  # multi-cell model
-            # Prepare batch for multi-cell model
-            processed_batch = prepare_multicell_batch(batch, device)
-            gene_expr = processed_batch['gene_expr']
-            num_cells = processed_batch['num_cells']
-            real_images = batch['image']
-            patch_ids = batch['patch_id']
-            
-            if args.method == 'diffusion':
-                logger.info("Generating images with diffusion...")
-                generated_images = generate_images_with_diffusion(
-                    model=model,
-                    diffusion=flow_model,
-                    gene_expr=gene_expr,
-                    device=device,
-                    num_steps=args.gen_steps,
-                    num_cells=num_cells,
-                    is_multi_cell=True,
-                    method=args.sampling_method
-                )
-            else:  # rectified_flow
-                logger.info("Generating images with rectified flow...")
-                generated_images = generate_images_with_rectified_flow(
-                    model=model,
-                    rectified_flow=flow_model,
-                    gene_expr=gene_expr,
-                    device=device,
-                    num_steps=args.gen_steps,
-                    num_cells=num_cells,
-                    is_multi_cell=True
-                )
-
-    # Save results
-    os.makedirs(os.path.join(args.output_dir, "generated_images"), exist_ok=True)
+    
+    # Handle data differently based on model type
+    if args.model_type == 'single':
+        gene_expr = batch['gene_expr'].to(device)
+        real_images = batch['image']
+        cell_ids = batch['cell_id']
+        gene_mask = batch.get('gene_mask', None)
+        if gene_mask is not None:
+            gene_mask = gene_mask.to(device)
+        
+        # Generate images with rectified flow
+        logger.info(f"Generating images for {len(gene_expr)} samples using rectified flow...")
+        with torch.no_grad():
+            generated_images = generate_images_with_rectified_flow(
+                model=model,
+                rectified_flow=rectified_flow,
+                gene_expr=gene_expr,
+                device=device,
+                num_steps=args.gen_steps,
+                gene_mask=gene_mask,
+                is_multi_cell=False
+            )
+        logger.info("Image generation complete")
+    else:  # multi-cell model
+        # Prepare batch for multi-cell model
+        processed_batch = prepare_multicell_batch(batch, device)
+        gene_expr = processed_batch['gene_expr']
+        num_cells = processed_batch['num_cells']
+        real_images = batch['image']
+        patch_ids = batch['patch_id']
+        
+        # Generate images with rectified flow
+        logger.info(f"Generating images for {len(real_images)} patches using rectified flow...")
+        with torch.no_grad():
+            generated_images = generate_images_with_rectified_flow(
+                model=model,
+                rectified_flow=rectified_flow,
+                gene_expr=gene_expr,
+                device=device,
+                num_steps=args.gen_steps,
+                num_cells=num_cells,
+                is_multi_cell=True
+            )
+        logger.info("Image generation complete")
 
     # Calculate number of extra channels beyond RGB
     num_channels = args.img_channels

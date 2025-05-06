@@ -13,10 +13,10 @@ from torch.utils.data import Dataset, DataLoader
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.single_model import RNAtoHnEModel
 from baseline.diffusion import GaussianDiffusion
+from src.utils import setup_parser, parse_adata
 from src.multi_model import MultiCellRNAtoHnEModel, prepare_multicell_batch
-from baseline.diffusion_train import train_with_diffusion, generate_images_with_diffusion
-from src.utils import setup_parser, parse_adata, analyze_gene_importance_diffusion
 from src.dataset import CellImageGeneDataset, PatchImageGeneDataset, patch_collate_fn
+from baseline.diffusion_train import generate_images_with_diffusion
 
 # Configure logging
 logging.basicConfig(
@@ -25,12 +25,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ======================================
-# Main Function
-# ======================================
-
 def main():
-    parser = argparse.ArgumentParser(description="Train and evaluate RNA to H&E cell image generator with Rectified Flow.")
+    parser = argparse.ArgumentParser(description="Generate images using pretrained RNA to H&E model with Diffusion.")
+    parser.add_argument('--model_path', type=str, required=True, help='Path to the pretrained model.')
     parser.add_argument('--gene_expr', type=str, default="cell_256_aux/normalized.csv", help='Path to gene expression CSV file.')
     parser.add_argument('--image_paths', type=str, default="cell_256_aux/input/cell_image_paths.json", help='Path to JSON file with image paths.')
     parser.add_argument('--patch_image_paths', type=str, default="cell_256_aux/input/patch_image_paths.json", help='Path to JSON file with patch paths.')
@@ -57,6 +54,7 @@ def main():
 
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(os.path.join(args.output_dir, "generated_images"), exist_ok=True)
 
     # Set device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -65,13 +63,13 @@ def main():
     # Set random seed for reproducibility
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
-    
+
     # Load gene expression data
     if args.adata is not None:
         logger.info(f"Loading AnnData from {args.adata}")
         expr_df, missing_gene_symbols = parse_adata(args)
     else:
-        logger.warning(f"(deprecated) Loading gene expression data from {args.gene_expr}")
+        logger.info(f"Loading gene expression data from {args.gene_expr}")
         expr_df = pd.read_csv(args.gene_expr, index_col=0)
     logger.info(f"Loaded gene expression data with shape: {expr_df.shape}")
     gene_names = expr_df.columns.tolist()
@@ -80,19 +78,23 @@ def main():
     if args.model_type == 'single':
         logger.info("Creating single-cell dataset")
 
-        # Load image paths
-        logger.info(f"Loading image paths from {args.image_paths}")
-        with open(args.image_paths, "r") as f:
-            image_paths = json.load(f)
-        logger.info(f"Loaded {len(image_paths)} cell image paths")
+        # Load image paths if provided (for visualization)
+        if args.image_paths:
+            logger.info(f"Loading image paths from {args.image_paths}")
+            with open(args.image_paths, "r") as f:
+                image_paths = json.load(f)
+            logger.info(f"Loaded {len(image_paths)} cell image paths")
 
-        image_paths_tmp = {}
-        for k,v in image_paths.items():
-            if os.path.exists(v):
-                image_paths_tmp[k] = v
-        
-        image_paths = image_paths_tmp
-        print(len(image_paths))
+            # Filter out non-existent files
+            image_paths_tmp = {}
+            for k,v in image_paths.items():
+                if os.path.exists(v):
+                    image_paths_tmp[k] = v
+            
+            image_paths = image_paths_tmp
+            logger.info(f"After filtering: {len(image_paths)} valid cell image paths")
+        else:
+            image_paths = {}
         
         dataset = CellImageGeneDataset(
             expr_df, 
@@ -119,14 +121,13 @@ def main():
             with open(args.patch_image_paths, "r") as f:
                 patch_image_paths = json.load(f)
 
+            # Filter out non-existent files
             patch_image_paths_tmp = {}
             for k,v in patch_image_paths.items():
                 if os.path.exists(v):
                     patch_image_paths_tmp[k] = v
             patch_image_paths = patch_image_paths_tmp
-            print(len(patch_image_paths))
-
-            logger.info(f"Loaded {len(patch_image_paths)} patch image paths")
+            logger.info(f"After filtering: {len(patch_image_paths)} valid patch image paths")
         else:
             patch_image_paths = None
             
@@ -143,50 +144,29 @@ def main():
             normalize_aux=args.normalize_aux,
         )
     
-    # Split into train and validation sets
-    train_size = int(0.8 * len(dataset))
-    val_size = len(dataset) - train_size
-    train_dataset, val_dataset = torch.utils.data.random_split(
-        dataset, [train_size, val_size]
-    )
+    logger.info(f"Dataset created with {len(dataset)} samples")
     
+    # Create a subset of the dataset for generating images
+    num_vis_samples = min(args.num_samples, len(dataset))
+    vis_indices = torch.randperm(len(dataset))[:num_vis_samples]
+    vis_dataset = torch.utils.data.Subset(dataset, vis_indices)
+
+    # Use the appropriate collate function based on model type
     if args.model_type == 'multi':
-        # Use custom collate function for multi-cell dataset
-        train_loader = DataLoader(
-            train_dataset, 
-            batch_size=args.batch_size, 
-            shuffle=True, 
-            num_workers=4,
-            pin_memory=True,
-            collate_fn=patch_collate_fn
-        )
-        val_loader = DataLoader(
-            val_dataset, 
-            batch_size=args.batch_size, 
-            shuffle=False, 
-            num_workers=4,
-            pin_memory=True,
+        vis_loader = DataLoader(
+            vis_dataset, 
+            batch_size=num_vis_samples, 
+            shuffle=False,
             collate_fn=patch_collate_fn
         )
     else:
-        # Use default collate for single-cell dataset
-        train_loader = DataLoader(
-            train_dataset, 
-            batch_size=args.batch_size, 
-            shuffle=True, 
-            num_workers=4,
-            pin_memory=True
+        vis_loader = DataLoader(
+            vis_dataset, 
+            batch_size=num_vis_samples, 
+            shuffle=False
         )
-        val_loader = DataLoader(
-            val_dataset, 
-            batch_size=args.batch_size, 
-            shuffle=False, 
-            num_workers=4,
-            pin_memory=True
-        )
-    logger.info(f"Train set size: {len(train_dataset)}, Validation set size: {len(val_dataset)}")
     
-    # Initialize appropriate model
+    # Initialize appropriate model based on model type
     gene_dim = expr_df.shape[1]  # Number of genes
     
     if args.model_type == 'single':
@@ -228,99 +208,25 @@ def main():
             concat_mask=args.concat_mask if hasattr(args, 'concat_mask') else False,
         )
     
-    logger.info(f"Model initialized with gene dimension: {gene_dim}")
-
-    # Initialize the diffusion model directly on the correct device
-    diffusion = GaussianDiffusion(
-        timesteps=args.diffusion_timesteps if hasattr(args, 'diffusion_timesteps') else 1000,
-        beta_schedule=args.beta_schedule if hasattr(args, 'beta_schedule') else "cosine",
-        predict_noise=args.predict_noise if hasattr(args, 'predict_noise') else True,
-        device=device  # Specify the device here
-    )
-    logger.info("Initialized diffusion model on device: " + str(device))
-
-    # Train model
-    best_model_path = os.path.join(args.output_dir, f"best_{args.model_type}_rna_to_hne_model_diffusion.pt")
-    if not args.only_inference:
-        train_losses, val_losses = train_with_diffusion(
-            model=model,
-            train_loader=train_loader,
-            val_loader=val_loader,
-            diffusion=diffusion,
-            device=device,
-            num_epochs=args.epochs,
-            lr=args.lr,
-            best_model_path=best_model_path,
-            patience=args.patience,
-            use_amp=args.use_amp,
-            weight_decay=args.weight_decay,
-            is_multi_cell=(args.model_type == 'multi')  # Pass flag for multi-cell model
-        )
-        logger.info(f"Training complete. Best model saved at {best_model_path}")
-        
-        # Plot training curves
-        plt.figure(figsize=(10, 5))
-        plt.plot(train_losses, label='Train Loss')
-        plt.plot(val_losses, label='Validation Loss')
-        plt.xlabel('Epoch')
-        plt.ylabel('Loss')
-        plt.title('Training and Validation Loss')
-        plt.legend()
-        plt.savefig(os.path.join(args.output_dir, "training_curves.png"))
-    else:
-        logger.info(f"Skipping training. Using existing model at {best_model_path}")
-
-    # Load best model for evaluation
-    logger.info(f"Loading best model from {best_model_path}")
-    checkpoint = torch.load(best_model_path, weights_only=True)
+    # Load the pretrained model
+    logger.info(f"Loading pretrained model from {args.model_path}")
+    checkpoint = torch.load(args.model_path, weights_only=True)
     model.load_state_dict(checkpoint["model"])
     model.to(device)
-
-    # Generate images from validation set
-    logger.info("Generating images from validation set...")
-
-    # Skip importance analysis for multi-cell model for now
-    if args.model_type == 'single':
-        importance_output_path = os.path.join(args.output_dir, "gene_importance_scores.csv")
-        analyze_gene_importance_diffusion(
-            model=model,
-            data_loader=val_loader, # Use validation loader
-            diffusion=diffusion,
-            device=device,
-            gene_names=gene_names, # Pass the list of gene names
-            output_path=importance_output_path,
-            timesteps_to_analyze=args.analysis_timesteps if hasattr(args, 'analysis_timesteps') else None,
-            num_batches_to_analyze=args.analysis_batches if hasattr(args, 'analysis_batches') else None
-        )
-        logger.info(f"Gene importance scores saved to {importance_output_path}")
-
-    if hasattr(args, 'only_importance_anlaysis') and args.only_importance_anlaysis:
-        logger.info("Skipping image generation as only importance analysis is requested.")
-        return
-
-    # Create a subset of the validation set for visualization
-    num_vis_samples = min(10, len(val_dataset))
-    vis_indices = torch.randperm(len(val_dataset))[:num_vis_samples]
-    vis_dataset = torch.utils.data.Subset(val_dataset, vis_indices)
-
-    # Use the appropriate collate function based on model type
-    if args.model_type == 'multi':
-        vis_loader = DataLoader(
-            vis_dataset, 
-            batch_size=num_vis_samples, 
-            shuffle=False,
-            collate_fn=patch_collate_fn  # Use the same custom collate function
-        )
-    else:
-        vis_loader = DataLoader(
-            vis_dataset, 
-            batch_size=num_vis_samples, 
-            shuffle=False
-        )
-
+    model.eval()  # Set to evaluation mode
+    
+    # Initialize the diffusion model
+    diffusion = GaussianDiffusion(
+        timesteps=args.diffusion_timesteps,
+        beta_schedule=args.beta_schedule,
+        predict_noise=args.predict_noise,
+        device=device
+    )
+    logger.info(f"Initialized diffusion model with {args.diffusion_timesteps} timesteps and {args.beta_schedule} schedule")
+    
     # Get a batch of data
     batch = next(iter(vis_loader))
-
+    
     # Handle data differently based on model type
     if args.model_type == 'single':
         gene_expr = batch['gene_expr'].to(device)
@@ -331,16 +237,19 @@ def main():
             gene_mask = gene_mask.to(device)
         
         # Generate images with diffusion
-        generated_images = generate_images_with_diffusion(
-            model=model,
-            diffusion=diffusion,
-            gene_expr=gene_expr,
-            device=device,
-            num_steps=args.gen_steps,
-            gene_mask=gene_mask,
-            is_multi_cell=False,
-            method="ddim"  # Use DDIM for faster sampling
-        )
+        logger.info(f"Generating images for {len(gene_expr)} samples using diffusion ({args.sampling_method})...")
+        with torch.no_grad():
+            generated_images = generate_images_with_diffusion(
+                model=model,
+                diffusion=diffusion,
+                gene_expr=gene_expr,
+                device=device,
+                num_steps=args.gen_steps,
+                gene_mask=gene_mask,
+                is_multi_cell=False,
+                method=args.sampling_method
+            )
+        logger.info("Image generation complete")
     else:  # multi-cell model
         # Prepare batch for multi-cell model
         processed_batch = prepare_multicell_batch(batch, device)
@@ -350,19 +259,19 @@ def main():
         patch_ids = batch['patch_id']
         
         # Generate images with diffusion
-        generated_images = generate_images_with_diffusion(
-            model=model,
-            diffusion=diffusion,
-            gene_expr=gene_expr,
-            device=device,
-            num_steps=args.gen_steps,
-            num_cells=num_cells,
-            is_multi_cell=True,
-            method="ddim"  # Use DDIM for faster sampling
-        )
-
-    # Save results
-    os.makedirs(os.path.join(args.output_dir, "generated_images"), exist_ok=True)
+        logger.info(f"Generating images for {len(real_images)} patches using diffusion ({args.sampling_method})...")
+        with torch.no_grad():
+            generated_images = generate_images_with_diffusion(
+                model=model,
+                diffusion=diffusion,
+                gene_expr=gene_expr,
+                device=device,
+                num_steps=args.gen_steps,
+                num_cells=num_cells,
+                is_multi_cell=True,
+                method=args.sampling_method
+            )
+        logger.info("Image generation complete")
 
     # Calculate number of extra channels beyond RGB
     num_channels = args.img_channels
