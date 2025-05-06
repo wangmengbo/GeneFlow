@@ -1,3 +1,4 @@
+import math
 import torch
 import logging
 
@@ -51,7 +52,7 @@ class RectifiedFlow:
     
     def sample_path(self, x_1, t, noise=None):
         """
-        Sample from the path at time t.
+        Sample from the path at time t using non-linear interpolation and stochastic noise.
         
         Args:
             x_1: Target data sample (B, C, H, W)
@@ -72,19 +73,28 @@ class RectifiedFlow:
         if noise is None:
             noise = torch.randn_like(x_1)
         
-        # Interpolate between noise and data
-        sigma_t = self.noise_schedule(t_expanded)
-        interp_coef = t_expanded
+        # Non-linear interpolation using sinusoidal schedule for smoother trajectories
+        # This creates a more natural path between noise and data
+        interp_coef = torch.sin(t_expanded * (math.pi / 2))
+        
+        # Interpolate between noise and data with non-linear coefficient
         x_t = interp_coef * x_1 + (1 - interp_coef) * noise
         
-        # Compute the ground truth velocity (dx_t/dt)
-        velocity = x_1 - noise
+        # Add small stochastic noise proportional to time for better mixing
+        # This helps prevent mode collapse and improves diversity
+        noise_level = (1 - t_expanded) * 0.05
+        stochastic_noise = torch.randn_like(x_1) * noise_level
+        x_t = x_t + stochastic_noise
+        
+        # Compute adjusted velocity for non-linear path (derivative of path equation)
+        # This ensures the model learns the correct vector field
+        velocity = (x_1 - noise) * (math.pi / 2) * torch.cos(t_expanded * (math.pi / 2))
         
         return {
             "x_t": x_t,
             "velocity": velocity,
             "noise": noise,
-            "sigma_t": sigma_t
+            "sigma_t": self.noise_schedule(t_expanded)
         }
     
     def loss_fn(self, model_output, target_velocity):
