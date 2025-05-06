@@ -34,6 +34,7 @@ class RNAEncoder(nn.Module):
             first_layer_input_dim = input_dim * 2
             prev_dim = first_layer_input_dim
         else:
+            self.concat_mask = False
             prev_dim = input_dim
         
         for hidden_dim in hidden_dims:

@@ -52,6 +52,7 @@ def main():
     # Add argument for model type
     parser.add_argument('--model_type', type=str, choices=['single', 'multi'], default='multi', 
                         help='Type of model to use: single-cell or multi-cell')
+    parser.add_argument('--normalize_aux', action='store_true', help='Normalize auxiliary channels.')
     parser = setup_parser(parser)
     args = parser.parse_args()
 
@@ -76,23 +77,26 @@ def main():
     logger.info(f"Loaded gene expression data with shape: {expr_df.shape}")
     gene_names = expr_df.columns.tolist()
 
-    # Load image paths
-    logger.info(f"Loading image paths from {args.image_paths}")
-    with open(args.image_paths, "r") as f:
-        image_paths = json.load(f)
-    logger.info(f"Loaded {len(image_paths)} cell image paths")
-
-    image_paths_tmp = {}
-    for k,v in image_paths.items():
-        if os.path.exists(v):
-            image_paths_tmp[k] = v
     
-    image_paths = image_paths_tmp
-    print(len(image_paths))
 
     # Create appropriate dataset based on model type
     if args.model_type == 'single':
         logger.info("Creating single-cell dataset")
+
+        # Load image paths
+        logger.info(f"Loading image paths from {args.image_paths}")
+        with open(args.image_paths, "r") as f:
+            image_paths = json.load(f)
+        logger.info(f"Loaded {len(image_paths)} cell image paths")
+
+        image_paths_tmp = {}
+        for k,v in image_paths.items():
+            if os.path.exists(v):
+                image_paths_tmp[k] = v
+        
+        image_paths = image_paths_tmp
+        print(len(image_paths))
+        
         dataset = CellImageGeneDataset(
             expr_df, 
             image_paths, 
@@ -103,6 +107,7 @@ def main():
                 transforms.Resize((args.img_size, args.img_size), antialias=True),
             ]),
             missing_gene_symbols=missing_gene_symbols if 'missing_gene_symbols' in locals() else None,
+            normalize_aux=args.normalize_aux,
         )
     else:  # multi-cell model
         logger.info("Creating multi-cell dataset")
@@ -138,6 +143,7 @@ def main():
                 transforms.ToTensor(),
                 transforms.Resize((args.img_size, args.img_size), antialias=True),
             ]),
+            normalize_aux=args.normalize_aux,
         )
     
     # Split into train and validation sets

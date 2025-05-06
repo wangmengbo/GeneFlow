@@ -18,9 +18,24 @@ logger = logging.getLogger(__name__)
 # Dataset Implementation
 # ======================================
 
+def normalize_rgb(rgb_image):
+    rgb_image = rgb_image.astype(np.float32)
+    rgb_image = ((rgb_image - np.min(rgb_image) + 1e-6) / (np.max(rgb_image) - np.min(rgb_image) + 1e-6))
+    rgb_image = (rgb_image * 255).astype(np.uint8)
+    return rgb_image
+
+
+def normalize_aux(aux_image):
+    aux_image = aux_image.astype(np.float32)
+    aux_image = ((aux_image - np.min(aux_image) + 0.0001) / (np.max(aux_image) - np.min(aux_image) + 0.0001))
+    aux_image = (aux_image * 10000).astype(np.uint16)
+    return aux_image
+    
+
 class CellImageGeneDataset(Dataset):
     """Dataset for cell images and gene expression profiles with improved preprocessing"""
-    def __init__(self, expr_df, image_paths, img_size=256, img_channels=3, transform=None, missing_gene_symbols=None):
+    def __init__(self, expr_df, image_paths, img_size=256, img_channels=3, 
+                 transform=None, missing_gene_symbols=None, normalize_aux=False):
         """
         Args:
             expr_df: DataFrame with gene expression data (genes as rows, cells as columns)
@@ -30,6 +45,7 @@ class CellImageGeneDataset(Dataset):
         """
         self.expr_df = expr_df
         self.gene_list = expr_df.columns.tolist()
+        self.normalize_aux = normalize_aux
 
         # Load image paths
         if isinstance(image_paths, str):
@@ -56,8 +72,10 @@ class CellImageGeneDataset(Dataset):
             self.transform = transform
         
         self.missing_gene_symbols = missing_gene_symbols
-        self.missing_gene_indices = {gene: idx for idx, gene in enumerate(self.gene_list) 
-                                     if gene in self.missing_gene_symbols}
+        self.missing_gene_indices = None
+        if self.missing_gene_symbols:
+            self.missing_gene_indices = {gene: idx for idx, gene in enumerate(self.gene_list) 
+                                        if gene in self.missing_gene_symbols}
             
         if self.missing_gene_indices:
             logger.info(f"Initialized dataset with {len(self.missing_gene_indices)} missing gene indices identified.")
@@ -102,9 +120,8 @@ class CellImageGeneDataset(Dataset):
                         aux_channels.append(image[:, :, i])
                 
                 # Normalize RGB if needed
-                if rgb_image.dtype == np.uint16:
-                    rgb_image = ((rgb_image - np.min(rgb_image) + 0.0001) / (np.max(rgb_image) - np.min(rgb_image) + 0.0001))
-                    rgb_image = (rgb_image * 255).astype(np.uint8)
+                if rgb_image.dtype != np.uint8:
+                    rgb_image = normalize_rgb(rgb_image)
                 
                 # Convert RGB to PIL image for transforms
                 rgb_pil = PILImage.fromarray(rgb_image)
@@ -113,9 +130,8 @@ class CellImageGeneDataset(Dataset):
                 aux_pil_channels = []
                 for aux_channel in aux_channels:
                     # Normalize if needed
-                    if aux_channel.dtype == np.uint16:
-                        aux_channel = ((aux_channel - np.min(aux_channel) + 0.0001) / (np.max(aux_channel) - np.min(aux_channel) + 0.0001))
-                        aux_channel = (aux_channel * 255).astype(np.uint8)
+                    if self.normalize_aux and aux_channel.dtype != np.uint8:
+                        aux_channel = normalize_aux(aux_channel)
                     
                     # Convert to PIL image and convert to RGB to match the expected channel count
                     aux_pil = PILImage.fromarray(aux_channel, mode='L')
@@ -167,10 +183,9 @@ class CellImageGeneDataset(Dataset):
             else:
                 # Handle standard images (1 or 3 channels)
                 # Normalize TIFF image if it's 16-bit
-                if image.dtype == np.uint16:
+                if image.dtype != np.uint8:
                     # Normalize to [0, 1]
-                    image = ((image - np.min(image) + 0.0001) / (np.max(image) - np.min(image) + 0.0001))
-                    image = (image * 255).astype(np.uint8)
+                    image = normalize_rgb(image)
                     
                 # Convert to PIL image for transforms
                 if len(image.shape) == 2:
@@ -206,6 +221,7 @@ class CellImageGeneDataset(Dataset):
             'image': image
         }
 
+
 def patch_collate_fn(batch):
     patch_ids = [item['patch_id'] for item in batch]
     cell_ids_list = [item['cell_ids'] for item in batch]
@@ -237,9 +253,11 @@ def patch_collate_fn(batch):
         'num_cells': torch.tensor(num_cells)
     }
 
+
 class PatchImageGeneDataset(Dataset):
     """Dataset for patch-level images and corresponding cell gene expression profiles"""
-    def __init__(self, expr_df, patch_image_paths, patch_to_cells, img_size=256, img_channels=3, transform=None):
+    def __init__(self, expr_df, patch_image_paths, patch_to_cells, img_size=256, img_channels=3, 
+                 transform=None, normalize_aux=False):
         """
         Args:
             expr_df: DataFrame with gene expression data (cells as index, genes as columns)
@@ -253,6 +271,7 @@ class PatchImageGeneDataset(Dataset):
         self.gene_list = expr_df.columns.tolist()
         self.img_size = img_size
         self.img_channels = img_channels
+        self.normalize_aux = normalize_aux
         
         # Load patch image paths
         if isinstance(patch_image_paths, str):
@@ -325,50 +344,111 @@ class PatchImageGeneDataset(Dataset):
         try:
             # Try to open as TIFF first
             image = tifffile.imread(img_path)
+            image = image[:,:,:self.img_channels]
             
-            # Handle channel dimensions if needed
-            if len(image.shape) == 3 and image.shape[0] < 10:  # Likely channel-first format
-                image = np.transpose(image, (1, 2, 0))
-            
-            # Remove singleton dimensions
-            if len(image.shape) > 2 and 1 in image.shape:
-                image = np.squeeze(image)
-            
-            # Process multi-channel images
-            if len(image.shape) == 3:
-                # Limit to requested channels if needed
-                if image.shape[2] > self.img_channels:
-                    image = image[:, :, :self.img_channels]
+            # Check if we have a multi-channel image with 3 or more channels
+            if len(image.shape) == 3 and image.shape[2] >= 3:
+                # Split into RGB (first 3 channels) and auxiliary channels (remaining channels)
+                rgb_image = image[:, :, :3]
                 
-                # Normalize 16-bit images to 8-bit
-                if image.dtype == np.uint16:
-                    image = ((image - np.min(image) + 0.0001) / (np.max(image) - np.min(image) + 0.0001))
-                    image = (image * 255).astype(np.uint8)
+                # Get auxiliary channels if any exist
+                aux_channels = []
+                if image.shape[2] > 3:
+                    for i in range(3, image.shape[2]):
+                        aux_channels.append(image[:, :, i])
                 
+                # Normalize RGB if needed
+                if rgb_image.dtype != np.uint8:
+                    rgb_image = normalize_rgb(rgb_image)
+                
+                # Convert RGB to PIL image for transforms
+                rgb_pil = PILImage.fromarray(rgb_image)
+                
+                # Process auxiliary channels
+                aux_pil_channels = []
+                for aux_channel in aux_channels:
+                    # Normalize if needed
+                    if self.normalize_aux and aux_channel.dtype != np.uint8:
+                        aux_channel = normalize_aux(aux_channel)
+                    
+                    # Convert to PIL image and convert to RGB to match the expected channel count
+                    aux_pil = PILImage.fromarray(aux_channel, mode='L')
+                    aux_pil = aux_pil.convert('RGB')  # Convert to RGB to match transform expectations
+                    aux_pil_channels.append(aux_pil)
+                
+                # Apply transforms
+                if self.transform:
+                    rgb_transformed = self.transform(rgb_pil)
+                    
+                    aux_transformed = []
+                    for aux_pil in aux_pil_channels:
+                        aux_transformed.append(self.transform(aux_pil))
+                    
+                    # Now we need to extract just the first channel from each aux_transformed
+                    # since we converted them to RGB but only need the first channel
+                    
+                    # All transformed images should now be tensors with shape [C, H, W]
+                    # For RGB: shape is [3, H, W]
+                    # For aux (converted to RGB): shape is [3, H, W] but all channels are identical
+                    
+                    # Extract only the first channel from each aux tensor and reshape
+                    aux_single_channels = []
+                    for aux_tensor in aux_transformed:
+                        # Take only the first channel and keep dimensions
+                        aux_single_channel = aux_tensor[0:1]  # Shape: [1, H, W]
+                        aux_single_channels.append(aux_single_channel)
+                    
+                    # Concatenate all tensors along the channel dimension
+                    # RGB tensor shape: [3, H, W]
+                    # Each aux tensor shape: [1, H, W]
+                    image = torch.cat([rgb_transformed] + aux_single_channels, dim=0)
+                    
+                else:
+                    # If no transforms, convert to tensors manually
+                    rgb_tensor = transforms.ToTensor()(rgb_pil)
+                    
+                    aux_tensors = []
+                    for aux_pil in aux_pil_channels:
+                        # Convert back to grayscale if we converted to RGB earlier
+                        if aux_pil.mode == 'RGB':
+                            aux_pil = aux_pil.convert('L')
+                        aux_tensor = transforms.ToTensor()(aux_pil)  # Shape: [1, H, W]
+                        aux_tensors.append(aux_tensor)
+                    
+                    # Concatenate all tensors
+                    image = torch.cat([rgb_tensor] + aux_tensors, dim=0)
+                    
+            else:
+                # Handle standard images (1 or 3 channels)
+                # Normalize TIFF image if it's 16-bit
+                if image.dtype != np.uint8:
+                    image = normalize_rgb(image)
+                    
                 # Convert to PIL image for transforms
-                pil_img = PILImage.fromarray(image)
-                
-            elif len(image.shape) == 2:  # Grayscale
-                # Normalize 16-bit images to 8-bit
-                if image.dtype == np.uint16:
-                    image = ((image - np.min(image) + 0.0001) / (np.max(image) - np.min(image) + 0.0001))
-                    image = (image * 255).astype(np.uint8)
-                
-                # Convert to PIL image
-                pil_img = PILImage.fromarray(image, mode='L')
-                
-                # Convert to RGB if needed
-                if self.img_channels == 3:
-                    pil_img = pil_img.convert('RGB')
-            
-            # Apply transforms
-            if self.transform:
-                image = self.transform(pil_img)
+                if len(image.shape) == 2:
+                    # Grayscale
+                    pil_img = PILImage.fromarray(image, mode='L')
+                    # Convert to RGB if needed
+                    if self.img_channels == 3:
+                        pil_img = pil_img.convert('RGB')
+                else:
+                    # Already RGB
+                    pil_img = PILImage.fromarray(image)
+                    
+                # Apply transforms
+                if self.transform:
+                    image = self.transform(pil_img)
                 
         except Exception as e:
             logger.error(f"Error loading image {img_path}: {e}")
             # Create a blank image as fallback
-            channels = self.img_channels if self.img_channels else 3
-            image = torch.zeros(channels, self.img_size, self.img_size)
+            if hasattr(self, 'img_channels') and self.img_channels == 1:
+                pil_img = PILImage.new('L', (self.img_size, self.img_size), 0)
+            else:
+                pil_img = PILImage.new('RGB', (self.img_size, self.img_size), (0, 0, 0))
+            
+            # Apply transforms
+            if self.transform:
+                image = self.transform(pil_img)
         
         return image
