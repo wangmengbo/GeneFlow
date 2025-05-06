@@ -7,8 +7,8 @@ import argparse
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
+from torch.utils.data import Dataset, DataLoader
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.single_model import RNAtoHnEModel
@@ -46,7 +46,7 @@ def main():
     parser.add_argument('--patience', type=int, default=5, help='Early stopping patience.')
     parser.add_argument('--gen_steps', type=int, default=100, help='Number of steps for solver during generation.')
     parser.add_argument('--seed', type=int, default=np.random.randint(100), help='Random seed for reproducibility.')
-    parser.add_argument('--model_type', type=str, choices=['single', 'multi'], default='single', help='Type of model to use: single-cell or multi-cell')
+    parser.add_argument('--model_type', type=str, choices=['single', 'multi'], default='multi', help='Type of model to use: single-cell or multi-cell')
     parser.add_argument('--normalize_aux', action='store_true', help='Normalize auxiliary channels.')
     parser = setup_parser(parser)
     args = parser.parse_args()

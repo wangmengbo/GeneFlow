@@ -27,7 +27,7 @@ def normalize_rgb(rgb_image):
 def normalize_aux(aux_image):
     aux_image = aux_image.astype(np.float32)
     aux_image = ((aux_image - np.min(aux_image) + 1e-6) / (np.max(aux_image) - np.min(aux_image) + 1e-6))
-    aux_image = (aux_image * 10000).astype(np.uint16)
+    aux_image = (aux_image * 255).astype(np.uint8)
     return aux_image
 
 class CellImageGeneDataset(Dataset):
