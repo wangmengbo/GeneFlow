@@ -274,7 +274,6 @@ class MultiCellRNAEncoder(nn.Module):
         # Compute attention weights (per head)
         cell_attention_weights = F.softmax(attention_logits, dim=2)  # [B, num_heads, C]
         
-        # --- FIX: Properly handle tensor dimensions for bmm operation ---
         # We need to do the aggregation for each batch and head separately
         
         # Initialize output tensor for collected head outputs
@@ -312,7 +311,6 @@ class MultiCellRNAEncoder(nn.Module):
     def get_gene_importance(self):
         """Return the learned importance of each gene"""
         return F.softmax(self.gene_attention, dim=0)
-
 
 # Helper Residual Block for the encoder
 class ResidualBlock(nn.Module):

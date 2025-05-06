@@ -24,13 +24,11 @@ def normalize_rgb(rgb_image):
     rgb_image = (rgb_image * 255).astype(np.uint8)
     return rgb_image
 
-
 def normalize_aux(aux_image):
     aux_image = aux_image.astype(np.float32)
-    aux_image = ((aux_image - np.min(aux_image) + 0.0001) / (np.max(aux_image) - np.min(aux_image) + 0.0001))
+    aux_image = ((aux_image - np.min(aux_image) + 1e-6) / (np.max(aux_image) - np.min(aux_image) + 1e-6))
     aux_image = (aux_image * 10000).astype(np.uint16)
     return aux_image
-    
 
 class CellImageGeneDataset(Dataset):
     """Dataset for cell images and gene expression profiles with improved preprocessing"""
@@ -213,7 +211,7 @@ class CellImageGeneDataset(Dataset):
             # Apply transforms
             if self.transform:
                 image = self.transform(pil_img)
-        
+
         return {
             'cell_id': cell_id,
             'gene_expr': gene_expr,
@@ -330,6 +328,11 @@ class PatchImageGeneDataset(Dataset):
         # Load and preprocess the patch image
         img_path = self.patch_image_paths[patch_id]
         image = self._load_image(img_path)
+
+        print('patch aaa')
+        print(np.unique(image.numpy()[:, :, :3]))
+        print('patch bbb')
+        print(np.unique(image.numpy()[:, :, 3]))
         
         return {
             'patch_id': patch_id,

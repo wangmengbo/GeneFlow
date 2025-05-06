@@ -35,7 +35,6 @@ def setup_parser(parser=None):
     parser.add_argument('--concat_mask', action='store_true', default=False, help='Concatenate mask to the input of the RNA encoder.')
     return parser
 
-
 def parse_adata(args=None, 
                 adata=None,
                 layer=None,
