@@ -112,7 +112,7 @@ def calculate_image_metrics(real_images, generated_images):
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate RNA to H&E model with Rectified Flow using FID, SSIM, and PSNR metrics.")
-    parser.add_argument('--model_path', type=str, default="cell_256_aux/output_rectified/best_single_rna_to_hne_model_rectified-multihead1.pt", help='Path to the pretrained model.')
+    parser.add_argument('--model_path', type=str, default="cell_256_aux/output_rectified/best_single_rna_to_hne_model_rectified_multi-head.pt", help='Path to the pretrained model.')
     parser.add_argument('--gene_expr', type=str, default="cell_256_aux/normalized.csv", help='Path to gene expression CSV file.')
     parser.add_argument('--image_paths', type=str, default="cell_256_aux/input/cell_image_paths.json", help='Path to JSON file with image paths.')
     parser.add_argument('--patch_image_paths', type=str, default="cell_256_aux/input/patch_image_paths.json", help='Path to JSON file with patch paths.')

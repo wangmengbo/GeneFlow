@@ -46,7 +46,7 @@ def main():
     parser.add_argument('--patience', type=int, default=5, help='Early stopping patience.')
     parser.add_argument('--gen_steps', type=int, default=100, help='Number of steps for solver during generation.')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility.')
-    parser.add_argument('--model_type', type=str, choices=['single', 'multi'], default='single', help='Type of model to use: single-cell or multi-cell')
+    parser.add_argument('--model_type', type=str, choices=['single', 'multi'], default='multi', help='Type of model to use: single-cell or multi-cell')
     parser.add_argument('--normalize_aux', action='store_true', help='Normalize auxiliary channels.')
     parser = setup_parser(parser)
     args = parser.parse_args()
