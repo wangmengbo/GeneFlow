@@ -48,6 +48,11 @@ def main():
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility.')
     parser.add_argument('--model_type', type=str, choices=['single', 'multi'], default='multi', help='Type of model to use: single-cell or multi-cell')
     parser.add_argument('--normalize_aux', action='store_true', help='Normalize auxiliary channels.')
+    parser.add_argument('--relation_rank', type=int, default=50, 
+                        help='Rank K for low-rank factorization in gene relation network (default: 50).')
+    parser.add_argument('--num_aggregation_heads', type=int, default=4, 
+                        help='Number of heads for cell aggregation in MultiCellRNAEncoder (multi-cell only, default: 4).')
+    
     parser = setup_parser(parser)
     args = parser.parse_args()
 
@@ -71,8 +76,6 @@ def main():
         expr_df = pd.read_csv(args.gene_expr, index_col=0)
     logger.info(f"Loaded gene expression data with shape: {expr_df.shape}")
     gene_names = expr_df.columns.tolist()
-
-    
 
     # Create appropriate dataset based on model type
     if args.model_type == 'single':
@@ -148,7 +151,23 @@ def main():
         dataset, [train_size, val_size]
     )
     
-    if args.model_type == 'multi':
+    if args.model_type == 'single':
+        # Use default collate for single-cell dataset
+        train_loader = DataLoader(
+            train_dataset, 
+            batch_size=args.batch_size, 
+            shuffle=True, 
+            num_workers=4,
+            pin_memory=True
+        )
+        val_loader = DataLoader(
+            val_dataset, 
+            batch_size=args.batch_size, 
+            shuffle=False, 
+            num_workers=4,
+            pin_memory=True
+        )
+    else:
         # Use custom collate function for multi-cell dataset
         train_loader = DataLoader(
             train_dataset, 
@@ -166,65 +185,36 @@ def main():
             pin_memory=True,
             collate_fn=patch_collate_fn
         )
-    else:
-        # Use default collate for single-cell dataset
-        train_loader = DataLoader(
-            train_dataset, 
-            batch_size=args.batch_size, 
-            shuffle=True, 
-            num_workers=4,
-            pin_memory=True
-        )
-        val_loader = DataLoader(
-            val_dataset, 
-            batch_size=args.batch_size, 
-            shuffle=False, 
-            num_workers=4,
-            pin_memory=True
-        )
     logger.info(f"Train set size: {len(train_dataset)}, Validation set size: {len(val_dataset)}")
     
     # Initialize appropriate model
     gene_dim = expr_df.shape[1]  # Number of genes
     
+    model_constructor_args = dict(
+        rna_dim= gene_dim,
+        img_channels= args.img_channels,
+        img_size= args.img_size,
+        model_channels= 128,
+        num_res_blocks= 2,
+        attention_resolutions= (16,),
+        dropout= 0.1,        
+        channel_mult= (1, 2, 2, 2),
+        use_checkpoint= False,
+        num_heads= 2,    
+        num_head_channels= 16, 
+        use_scale_shift_norm=True,
+        resblock_updown=True,
+        use_new_attention_order=True,
+        concat_mask= args.concat_mask,
+        relation_rank= args.relation_rank,
+    )
+
     if args.model_type == 'single':
         logger.info("Initializing single-cell model")
-        model = RNAtoHnEModel(
-            rna_dim=gene_dim,
-            img_channels=args.img_channels,
-            img_size=args.img_size,
-            model_channels=128,
-            num_res_blocks=2,
-            attention_resolutions=[16],
-            dropout=0.1,
-            channel_mult=(1, 2, 2, 2),
-            use_checkpoint=False,
-            num_heads=2,
-            num_head_channels=16,
-            use_scale_shift_norm=True,
-            resblock_updown=True,
-            use_new_attention_order=True,
-            concat_mask=args.concat_mask if hasattr(args, 'concat_mask') else False,
-        )
+        model = RNAtoHnEModel(**model_constructor_args)
     else:  # multi-cell model
         logger.info("Initializing multi-cell model")
-        model = MultiCellRNAtoHnEModel(
-            rna_dim=gene_dim,
-            img_channels=args.img_channels,
-            img_size=args.img_size,
-            model_channels=128,
-            num_res_blocks=2,
-            attention_resolutions=[16],
-            dropout=0.1,
-            channel_mult=(1, 2, 2, 2),
-            use_checkpoint=False,
-            num_heads=2,
-            num_head_channels=16,
-            use_scale_shift_norm=True,
-            resblock_updown=True,
-            use_new_attention_order=True,
-            concat_mask=args.concat_mask if hasattr(args, 'concat_mask') else False,
-        )
+        model = MultiCellRNAtoHnEModel(**model_constructor_args, num_aggregation_heads=args.num_aggregation_heads)
     
     logger.info(f"Model initialized with gene dimension: {gene_dim}")
     
@@ -271,25 +261,6 @@ def main():
     
     # Generate images from validation set
     logger.info("Generating images from validation set...")
-    
-    # Skip importance analysis for multi-cell model for now
-    if args.model_type == 'single':
-        importance_output_path = os.path.join(args.output_dir, "gene_importance_scores.csv")
-        analyze_gene_importance(
-            model=model,
-            data_loader=val_loader, # Use validation loader
-            rectified_flow=rectified_flow,
-            device=device,
-            gene_names=gene_names, # Pass the list of gene names
-            output_path=importance_output_path,
-            timesteps_to_analyze=args.analysis_timesteps if hasattr(args, 'analysis_timesteps') else None,
-            num_batches_to_analyze=args.analysis_batches if hasattr(args, 'analysis_batches') else None
-        )
-        logger.info(f"Gene importance scores saved to {importance_output_path}")
-
-    if hasattr(args, 'only_importance_anlaysis') and args.only_importance_anlaysis:
-        logger.info("Skipping image generation as only importance analysis is requested.")
-        return
     
     # Create a subset of the validation set for visualization
     num_vis_samples = min(10, len(val_dataset))
@@ -436,6 +407,25 @@ def main():
     plt.savefig(os.path.join(args.output_dir, "generation_results.png"))
     
     logger.info(f"Results saved to {args.output_dir}")
+
+    # Skip importance analysis for multi-cell model for now
+    if args.model_type == 'single':
+        importance_output_path = os.path.join(args.output_dir, "gene_importance_scores.csv")
+        analyze_gene_importance(
+            model=model,
+            data_loader=val_loader, # Use validation loader
+            rectified_flow=rectified_flow,
+            device=device,
+            gene_names=gene_names, # Pass the list of gene names
+            output_path=importance_output_path,
+            timesteps_to_analyze=args.analysis_timesteps if hasattr(args, 'analysis_timesteps') else None,
+            num_batches_to_analyze=args.analysis_batches if hasattr(args, 'analysis_batches') else None
+        )
+        logger.info(f"Gene importance scores saved to {importance_output_path}")
+
+    if hasattr(args, 'only_importance_anlaysis') and args.only_importance_anlaysis:
+        logger.info("Skipping image generation as only importance analysis is requested.")
+        return
 
 if __name__ == "__main__":
     main()
