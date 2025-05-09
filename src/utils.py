@@ -1,3 +1,4 @@
+import os
 import torch
 import numpy as np
 import scanpy as sc
@@ -45,7 +46,7 @@ def parse_adata(args=None,
                 max_total_counts=None, 
                 min_total_pct=None, 
                 max_total_pct=None,
-                use_full_gene_list=None,
+                # use_full_gene_list=None,
                 gene_symbols=None,
                 missing_gene_symbols=None,
                 concat_mask=None,
@@ -68,8 +69,8 @@ def parse_adata(args=None,
             min_total_pct = args.min_total_pct
         if max_total_pct is None and args.max_total_pct is not None:
             max_total_pct = args.max_total_pct
-        if use_full_gene_list is None:
-            use_full_gene_list = args.use_full_gene_list
+        # if use_full_gene_list is None:
+        #     use_full_gene_list = args.use_full_gene_list
         if gene_symbols is None:
             gene_symbols = args.gene_symbols
         if missing_gene_symbols is None:
@@ -103,26 +104,26 @@ def parse_adata(args=None,
         threshold = np.percentile(adata.obs["total_counts"], max_total_pct * 100)
         adata = adata[adata.obs["total_counts"] <= threshold]
 
-    if missing_gene_symbols is not None:
-        if type(missing_gene_symbols) is str:
-            missing_gene_symbols = pd.read_csv(missing_gene_symbols, header=None)[0].tolist()
-            logger.info(f"Loaded {len(missing_gene_symbols)} missing gene symbols from {args.missing_gene_symbols}")
+    if missing_gene_symbols is not None and os.path.isfile(missing_gene_symbols):
+        missing_gene_symbols = pd.read_csv(missing_gene_symbols, header=None)[0].tolist()
+        logger.info(f"Loaded {len(missing_gene_symbols)} missing gene symbols from {args.missing_gene_symbols}")
+    else:
+        missing_gene_symbols = set()
+
+    if gene_symbols is not None and os.path.isfile(gene_symbols):
+        gene_symbols = pd.read_csv(gene_symbols, header=None)[0].tolist()
 
     ngenes = adata.n_vars
     genes = adata.var_names.tolist()
     expr = adata.to_df()
     # mask = None
-    if use_full_gene_list:
-        if type(gene_symbols) is str:
-            gene_symbols = pd.read_csv(gene_symbols, header=None)[0].tolist()
+    # if use_full_gene_list:
+    if gene_symbols is not None and len(gene_symbols) > 0:
         ngenes = len(gene_symbols)
         genes = gene_symbols
         expr = pd.DataFrame(np.zeros((adata.n_obs, ngenes)), index=adata.obs_names, columns=gene_symbols)
         expr.update(adata.to_df())
-        if missing_gene_symbols is None:
-            missing_gene_symbols = list(set(gene_symbols) - set(adata.var_names))
-        else:
-            missing_gene_symbols = list(set(missing_gene_symbols) + set(gene_symbols) - set(adata.var_names))
+        missing_gene_symbols = list(set(missing_gene_symbols) | (set(gene_symbols) - set(adata.var_names)))
 
     # mask = pd.DataFrame(np.ones((adata.n_obs, ngenes)).astype(int), index=adata.obs_names, columns=genes)
     # mask.loc[:, missing_gene_symbols] = 0
