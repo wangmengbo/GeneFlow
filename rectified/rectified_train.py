@@ -195,9 +195,17 @@ def train_with_rectified_flow(
             best_val_loss = val_loss
 
             model_config = {
-                'rna_dim': model.rna_dim,
+                'model_type': 'multi' if is_multi_cell else 'single',
+                'rna_dim': model.rna_dim, # Already saving this implicitly via model state
                 'img_channels': model.img_channels,
                 'img_size': model.img_size,
+                'relation_rank': getattr(model.rna_encoder, 'relation_rank', None) if hasattr(model, 'rna_encoder') else None, # For MultiCellRNAEncoder and potentially SingleCell
+                'num_aggregation_heads': getattr(model.rna_encoder, 'num_aggregation_heads', None) if is_multi_cell and hasattr(model, 'rna_encoder') else None,
+                'concat_mask': getattr(model.rna_encoder, 'concat_mask', None) if hasattr(model, 'rna_encoder') else None,
+                # Add any other critical architectural args from your args that define the model structure
+                # For example, if model_channels, num_res_blocks etc. can vary and are passed via args:
+                # 'model_channels': args.model_channels, # Assuming args is available or these are on model
+                # 'num_res_blocks': args.num_res_blocks,
             }
 
             torch.save({

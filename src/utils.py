@@ -35,6 +35,10 @@ def setup_parser(parser=None):
     parser.add_argument('--analysis_batches', type=int, default=10, help='Number of validation batches to use for importance analysis.')
     parser.add_argument('--missing_gene_symbols', type=str, default=None, help='Path to a file containing missing gene symbols, one per line.')
     parser.add_argument('--concat_mask', action='store_true', default=False, help='Concatenate mask to the input of the RNA encoder.')
+    parser.add_argument('--relation_rank', type=int, default=50, 
+                        help='Rank K for low-rank factorization in gene relation network (default: 50).')
+    parser.add_argument('--num_aggregation_heads', type=int, default=4, 
+                        help='Number of heads for cell aggregation in MultiCellRNAEncoder (multi-cell only, default: 4).')
     parser.add_argument('--nsamples_test', type=int, default=-1, help='Number of batches to use for testing.')
     return parser
 

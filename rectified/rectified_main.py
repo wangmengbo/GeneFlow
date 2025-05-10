@@ -48,10 +48,6 @@ def main():
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility.')
     parser.add_argument('--model_type', type=str, choices=['single', 'multi'], default='multi', help='Type of model to use: single-cell or multi-cell')
     parser.add_argument('--normalize_aux', action='store_true', help='Normalize auxiliary channels.')
-    parser.add_argument('--relation_rank', type=int, default=50, 
-                        help='Rank K for low-rank factorization in gene relation network (default: 50).')
-    parser.add_argument('--num_aggregation_heads', type=int, default=4, 
-                        help='Number of heads for cell aggregation in MultiCellRNAEncoder (multi-cell only, default: 4).')
     
     parser = setup_parser(parser)
     args = parser.parse_args()

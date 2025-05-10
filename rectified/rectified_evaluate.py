@@ -240,17 +240,17 @@ def main():
     model = None
     try:
         if args.model_type == 'single':
-            model = RNAtoHnEModel(**model_constructor_args)
+            model = RNAtoHnEModel(**model_constructor_args, relation_rank=args.relation_rank)
         else:
             model = MultiCellRNAtoHnEModel(**model_constructor_args, relation_rank=args.relation_rank)
         model.load_state_dict(checkpoint["model"])
     except Exception as e:
-        logger.warning(f"Failed to load model with current constructor, trying deprecated: {e}")
-        model_constructor_args_dep = {k:v for k,v in model_constructor_args.items() if k!='concat_mask'}
+        logger.error(f"Failed to load model with current constructor: {e}")
+        logger.warning(f"Attempting to load model with deprecated constructor.")
         if args.model_type == 'single':
-            model = RNAtoHnEModel_deprecation(**model_constructor_args_dep)
+            model = RNAtoHnEModel_deprecation(**model_constructor_args)
         else:
-            model = MultiCellRNAtoHnEModel_deprecation(**model_constructor_args_dep, relation_rank=args.relation_rank)
+            model = MultiCellRNAtoHnEModel_deprecation(**model_constructor_args)
         model.load_state_dict(checkpoint["model"])
         
     logger.info(f"Model loaded successfully")
