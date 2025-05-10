@@ -21,20 +21,21 @@ def setup_parser(parser=None):
         parser = argparse.ArgumentParser(description="A tool for generating and managing prompts.")
     parser.add_argument("--adata", type=str, default="cell_256_aux/input/adata_unfiltered.h5ad", help="Path to the AnnData object.")
     parser.add_argument("--layer", type=str, default=None, help="Layer to use for the AnnData object.")
-    parser.add_argument("--cell_type", type=str, default=None)
+    parser.add_argument("--cell_type", type=str, nargs='*', default=None)
     parser.add_argument("--cell_type_label", type=str, default="cell_type")
     parser.add_argument("--min_total_counts", type=int, default=0)
     parser.add_argument("--max_total_counts", type=int, default=np.inf)
     parser.add_argument("--min_total_pct", type=float, default=0.0)
     parser.add_argument("--max_total_pct", type=float, default=1.0)
     parser.add_argument("--use_full_gene_list", action="store_true", default=False, help="Use the full gene list instead of the top 1000 highly variable genes.")
-    parser.add_argument("--gene_symbols", type=str, default="gene_symbols.txt", help="Path to the gene symbol list.")
+    parser.add_argument("--gene_symbols", type=str, default=None, help="Path to the gene symbol list.")
     parser.add_argument("--only_inference", action="store_true", default=False, help="Only run inference.")
     parser.add_argument('--only_importance_anlaysis', action='store_true', default=False, help='Only run gene importance analysis.')
     parser.add_argument('--analysis_timesteps', type=float, nargs='+', default=[0.1, 0.3, 0.5, 0.7, 0.9], help='List of timesteps (0 to 1) to use for importance analysis.')
     parser.add_argument('--analysis_batches', type=int, default=10, help='Number of validation batches to use for importance analysis.')
     parser.add_argument('--missing_gene_symbols', type=str, default=None, help='Path to a file containing missing gene symbols, one per line.')
     parser.add_argument('--concat_mask', action='store_true', default=False, help='Concatenate mask to the input of the RNA encoder.')
+    parser.add_argument('--nsamples_test', type=int, default=-1, help='Number of batches to use for testing.')
     return parser
 
 def parse_adata(args=None, 
@@ -50,6 +51,7 @@ def parse_adata(args=None,
                 gene_symbols=None,
                 missing_gene_symbols=None,
                 concat_mask=None,
+                nsamples_test=None,
                 ):
     # clean arguments
     if args is not None:
@@ -75,24 +77,34 @@ def parse_adata(args=None,
             gene_symbols = args.gene_symbols
         if missing_gene_symbols is None:
             missing_gene_symbols = args.missing_gene_symbols
+        if concat_mask is None:
+            concat_mask = args.concat_mask
+        if nsamples_test is None:
+            nsamples_test = args.nsamples_test
     
     # parse adata
     if type(adata) is str:
         adata = sc.read_h5ad(adata)
+        logger.info(f"Loaded AnnData object from {adata}")
+        logger.info(f"AnnData object has {adata.n_obs} cells and {adata.n_vars} genes")
     
     if layer is not None:
         adata.X = adata.layers[layer]
 
     if cell_type is not None:
-        adata = adata[adata.obs[cell_type_label] == cell_type]
+        logger.info(f"Filtering cells with cell type {cell_type}")
+        adata = adata[adata.obs[cell_type_label].isin(cell_type)]
+        logger.info(f"{len(adata)} cells with cell type {cell_type} passed the filter")
 
     if min_total_counts is not None and min_total_counts > 0:
         logger.info(f"Filtering cells with total counts < {min_total_counts}")
         adata = adata[adata.obs["total_counts"] >= min_total_counts]
+        logger.info(f"{len(adata)} cells with total counts > {min_total_counts} passed the filter")
     
     if max_total_counts is not None and max_total_counts < np.inf:
         logger.info(f"Filtering cells with total counts > {max_total_counts}")
         adata = adata[adata.obs["total_counts"] <= max_total_counts]
+        logger.info(f"{len(adata)} cells with total counts < {max_total_counts} passed the filter")
     
     if min_total_pct is not None and min_total_pct > 0.0:
         logger.info(f"Filtering cells with total pct < {min_total_pct * 100}%")
@@ -103,6 +115,7 @@ def parse_adata(args=None,
         logger.info(f"Filtering cells with total pct > {max_total_pct * 100}%")
         threshold = np.percentile(adata.obs["total_counts"], max_total_pct * 100)
         adata = adata[adata.obs["total_counts"] <= threshold]
+        logger.info(f"{len(adata)} cells with total pct < {max_total_pct * 100}% passed the filter")
 
     if missing_gene_symbols is not None and os.path.isfile(missing_gene_symbols):
         missing_gene_symbols = pd.read_csv(missing_gene_symbols, header=None)[0].tolist()
@@ -112,6 +125,11 @@ def parse_adata(args=None,
 
     if gene_symbols is not None and os.path.isfile(gene_symbols):
         gene_symbols = pd.read_csv(gene_symbols, header=None)[0].tolist()
+
+    if nsamples_test is not None and nsamples_test > 0:
+        logger.info(f"Subsampling {nsamples_test} cells for testing")
+        sc.pp.subsample(adata, n_obs=nsamples_test)
+        logger.info(f"Subsampled {len(adata)} cells for testing")
 
     ngenes = adata.n_vars
     genes = adata.var_names.tolist()

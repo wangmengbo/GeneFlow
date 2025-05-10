@@ -17,6 +17,8 @@ from src.utils import setup_parser, parse_adata
 from src.multi_model import MultiCellRNAtoHnEModel, prepare_multicell_batch
 from src.dataset import CellImageGeneDataset, PatchImageGeneDataset, patch_collate_fn
 from rectified.rectified_train import generate_images_with_rectified_flow
+from src.single_model_deprecation import RNAtoHnEModel as RNAtoHnEModel_deprecation
+from src.multi_model_deprecation import MultiCellRNAtoHnEModel as MultiCellRNAtoHnEModel_deprecation
 
 # Configure logging
 logging.basicConfig(
@@ -166,49 +168,52 @@ def main():
     # Initialize appropriate model based on model type
     gene_dim = expr_df.shape[1]  # Number of genes
     
-    if args.model_type == 'single':
-        logger.info("Initializing single-cell model")
-        model = RNAtoHnEModel(
-            rna_dim=gene_dim,
-            img_channels=args.img_channels,
-            img_size=args.img_size,
-            model_channels=128,
-            num_res_blocks=2,
-            attention_resolutions=[16],
-            dropout=0.1,
-            channel_mult=(1, 2, 2, 2),
-            use_checkpoint=False,
-            num_heads=2,
-            num_head_channels=16,
-            use_scale_shift_norm=True,
-            resblock_updown=True,
-            use_new_attention_order=True,
-            concat_mask=args.concat_mask if hasattr(args, 'concat_mask') else False,
-        )
-    else:  # multi-cell model
-        logger.info("Initializing multi-cell model")
-        model = MultiCellRNAtoHnEModel(
-            rna_dim=gene_dim,
-            img_channels=args.img_channels,
-            img_size=args.img_size,
-            model_channels=128,
-            num_res_blocks=2,
-            attention_resolutions=[16],
-            dropout=0.1,
-            channel_mult=(1, 2, 2, 2),
-            use_checkpoint=False,
-            num_heads=2,
-            num_head_channels=16,
-            use_scale_shift_norm=True,
-            resblock_updown=True,
-            use_new_attention_order=True,
-            concat_mask=args.concat_mask if hasattr(args, 'concat_mask') else False,
-        )
     
+    model_constructor_args = dict(
+        rna_dim= gene_dim,
+        img_channels= args.img_channels,
+        img_size= args.img_size,
+        model_channels= 128,
+        num_res_blocks= 2,
+        attention_resolutions= (16,),
+        dropout= 0.1,        
+        channel_mult= (1, 2, 2, 2),
+        use_checkpoint= False,
+        num_heads= 2,    
+        num_head_channels= 16, 
+        use_scale_shift_norm=True,
+        resblock_updown=True,
+        use_new_attention_order=True,
+        concat_mask= args.concat_mask,
+        # relation_rank= args.relation_rank,
+    )
+
     # Load the pretrained model
     logger.info(f"Loading pretrained model from {args.model_path}")
     checkpoint = torch.load(args.model_path, weights_only=True)
-    model.load_state_dict(checkpoint["model"])
+    model = None
+    try:
+        if args.model_type == 'single':
+            logger.info("Initializing single-cell model")
+            model = RNAtoHnEModel(**model_constructor_args,)
+        else:  # multi-cell model
+            logger.info("Initializing multi-cell model")
+            model = MultiCellRNAtoHnEModel(**model_constructor_args, relation_rank= args.relation_rank,)
+        model.load_state_dict(checkpoint["model"])
+    except Exception as e:
+        logger.error(f"Error loading model state dict: {e}")
+
+    if model is None:
+        if args.model_type == 'single':
+            logger.info("Initializing single-cell model (deprecated)")
+            model = RNAtoHnEModel_deprecation(**model_constructor_args,)
+        else:  # multi-cell model
+            logger.info("Initializing multi-cell model (deprecated)")
+            model = MultiCellRNAtoHnEModel_deprecation(**model_constructor_args, relation_rank= args.relation_rank,)
+        model.load_state_dict(checkpoint["model"])
+    logger.info(f"Model loaded successfully")
+    
+    # Load the pretrained model
     model.to(device)
     model.eval()  # Set to evaluation mode
     
