@@ -185,7 +185,8 @@ class GaussianDiffusion:
             pred_x_0 = model_output
             
         if clip_denoised:
-            pred_x_0 = torch.clamp(pred_x_0, -1.0, 1.0)
+            # pred_x_0 = torch.clamp(pred_x_0, -1.0, 1.0)
+            pred_x_0 = torch.clamp(pred_x_0, 0.0, 1.0)
             
         # Calculate model mean (posterior mean) and variance
         posterior = self.q_posterior_mean_variance(x_0=pred_x_0, x_t=x_t, t=t)
@@ -358,12 +359,14 @@ class GaussianDiffusion:
                 # Calculate x_0 from the noise prediction
                 pred_x_0 = (img - torch.sqrt(1 - a_t) * pred_noise) / torch.sqrt(a_t)
                 if self.clip_denoised:
-                    pred_x_0 = torch.clamp(pred_x_0, -1.0, 1.0)
+                    # pred_x_0 = torch.clamp(pred_x_0, -1.0, 1.0)
+                    pred_x_0 = torch.clamp(pred_x_0, 0.0, 1.0)
             else:
                 # Model directly predicts x_0
                 pred_x_0 = model_output
                 if self.clip_denoised:
-                    pred_x_0 = torch.clamp(pred_x_0, -1.0, 1.0)
+                    # pred_x_0 = torch.clamp(pred_x_0, -1.0, 1.0)
+                    pred_x_0 = torch.clamp(pred_x_0, 0.0, 1.0)
                 # Compute implied noise
                 pred_noise = (img - torch.sqrt(a_t) * pred_x_0) / torch.sqrt(1 - a_t)
             
@@ -537,7 +540,7 @@ class DiffusionSampler:
             raise ValueError(f"Unknown sampling method: {method}")
         
         # Scale to [0, 1] range for output
-        x = (x + 1) / 2.0  # Convert from [-1, 1] to [0, 1]
+        # x = (x + 1) / 2.0  # Convert from [-1, 1] to [0, 1]
         x = torch.clamp(x, 0, 1)
         
         return x
