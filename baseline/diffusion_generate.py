@@ -146,23 +146,29 @@ def main():
     
     logger.info(f"Dataset created with {len(dataset)} samples")
     
-    # Create a subset of the dataset for generating images
-    num_vis_samples = min(args.num_samples, len(dataset))
-    vis_indices = torch.randperm(len(dataset))[:num_vis_samples]
-    vis_dataset = torch.utils.data.Subset(dataset, vis_indices)
-
+    # # Create a subset of the dataset for generating images
+    # num_vis_samples = min(args.num_samples, len(dataset))
+    # vis_indices = torch.randperm(len(dataset))[:num_vis_samples]
+    # vis_dataset = torch.utils.data.Subset(dataset, vis_indices)
+    train_size = int(0.8 * len(dataset))
+    val_size = len(dataset) - train_size
+    _, vis_dataset = torch.utils.data.random_split(
+        dataset, [train_size, val_size]
+    )
+    num_vis_samples = min(10, len(vis_dataset))
+    
     # Use the appropriate collate function based on model type
     if args.model_type == 'multi':
         vis_loader = DataLoader(
             vis_dataset, 
-            batch_size=num_vis_samples, 
+            batch_size=args.batch_size, 
             shuffle=False,
             collate_fn=patch_collate_fn
         )
     else:
         vis_loader = DataLoader(
             vis_dataset, 
-            batch_size=num_vis_samples, 
+            batch_size=args.batch_size, 
             shuffle=False
         )
     

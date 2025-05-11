@@ -67,7 +67,7 @@ def parse_adata(args=None,
             layer = args.layer
         if cell_type is None and args.cell_type is not None:
             cell_type = args.cell_type
-        if exclude_cell_type is not None and args.exclude_cell_type is not None:
+        if exclude_cell_type is None and args.exclude_cell_type is not None:
             exclude_cell_type = args.exclude_cell_type
         if cell_type_label is None:
             cell_type_label = args.cell_type_label
@@ -107,7 +107,7 @@ def parse_adata(args=None,
     if exclude_cell_type is not None:
         logger.info(f"Filtering cells other than cell type {exclude_cell_type}")
         adata = adata[~adata.obs[cell_type_label].isin(exclude_cell_type)]
-        logger.info(f"{len(adata)} cells with cell type {exclude_cell_type} passed the filter")
+        logger.info(f"{len(adata)} cells other than cell type {exclude_cell_type} passed the filter")
 
     if min_total_counts is not None and min_total_counts > 0:
         logger.info(f"Filtering cells with total counts < {min_total_counts}")
