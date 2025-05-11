@@ -146,7 +146,7 @@ def main():
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility.')
     parser.add_argument('--model_type', type=str, choices=['single', 'multi'], default='single', help='Type of model to use: single-cell or multi-cell')
     parser.add_argument('--normalize_aux', action='store_true', help='Normalize auxiliary channels.')
-    parser.add_argument('--eval_samples', type=int, default=None, help='Number of samples to evaluate (None for all).')
+    # parser.add_argument('--eval_samples', type=int, default=None, help='Number of samples to evaluate (None for all).')
 
     parser = setup_parser(parser)
     args = parser.parse_args()
@@ -197,24 +197,31 @@ def main():
         )
     logger.info(f"Dataset created with {len(dataset)} samples")
 
-    if args.eval_samples is not None:
-        eval_size = min(args.eval_samples, len(dataset))
-        eval_indices = torch.randperm(len(dataset))[:eval_size].tolist()
-    else:
-        eval_size = min(int(0.2 * len(dataset)), len(dataset))
-        if eval_size == 0 and len(dataset) > 0: eval_size = len(dataset)
-        eval_indices = torch.randperm(len(dataset))[:eval_size].tolist()
+    # if args.eval_samples is not None:
+    #     eval_size = min(args.eval_samples, len(dataset))
+    #     eval_indices = torch.randperm(len(dataset))[:eval_size].tolist()
+    # else:
+    #     eval_size = min(int(0.2 * len(dataset)), len(dataset))
+    #     if eval_size == 0 and len(dataset) > 0: eval_size = len(dataset)
+    #     eval_indices = torch.randperm(len(dataset))[:eval_size].tolist()
     
-    if not eval_indices and len(dataset) > 0 : # If 20% is 0, but dataset is not empty, take all
-        logger.warning("Evaluation set was empty after sampling, using all dataset samples for evaluation.")
-        eval_indices = list(range(len(dataset)))
+    # if not eval_indices and len(dataset) > 0 : # If 20% is 0, but dataset is not empty, take all
+    #     logger.warning("Evaluation set was empty after sampling, using all dataset samples for evaluation.")
+    #     eval_indices = list(range(len(dataset)))
     
-    eval_dataset = torch.utils.data.Subset(dataset, eval_indices) if eval_indices else []
+    # eval_dataset = torch.utils.data.Subset(dataset, eval_indices) if eval_indices else []
 
 
-    if not eval_dataset:
-        logger.error("Evaluation dataset is empty. Exiting.")
-        return
+    # if not eval_dataset:
+    #     logger.error("Evaluation dataset is empty. Exiting.")
+    #     return
+
+    # Split into train and validation sets
+    train_size = int(0.8 * len(dataset))
+    val_size = len(dataset) - train_size
+    _, eval_dataset = torch.utils.data.random_split(
+        dataset, [train_size, val_size]
+    )
 
     collate_fn_to_use = patch_collate_fn if args.model_type == 'multi' else None
     eval_loader = DataLoader(

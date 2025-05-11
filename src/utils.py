@@ -22,6 +22,7 @@ def setup_parser(parser=None):
     parser.add_argument("--adata", type=str, default="cell_256_aux/input/adata_unfiltered.h5ad", help="Path to the AnnData object.")
     parser.add_argument("--layer", type=str, default=None, help="Layer to use for the AnnData object.")
     parser.add_argument("--cell_type", type=str, nargs='*', default=None)
+    parser.add_argument("--exclude_cell_type", type=str, nargs='*', default=None)
     parser.add_argument("--cell_type_label", type=str, default="cell_type")
     parser.add_argument("--min_total_counts", type=int, default=0)
     parser.add_argument("--max_total_counts", type=int, default=np.inf)
@@ -46,6 +47,7 @@ def parse_adata(args=None,
                 adata=None,
                 layer=None,
                 cell_type=None, 
+                exclude_cell_type=None,
                 cell_type_label=None, 
                 min_total_counts=None, 
                 max_total_counts=None, 
@@ -65,6 +67,8 @@ def parse_adata(args=None,
             layer = args.layer
         if cell_type is None and args.cell_type is not None:
             cell_type = args.cell_type
+        if exclude_cell_type is not None and args.exclude_cell_type is not None:
+            exclude_cell_type = args.exclude_cell_type
         if cell_type_label is None:
             cell_type_label = args.cell_type_label
         if min_total_counts is None and args.min_total_counts is not None:
@@ -99,6 +103,11 @@ def parse_adata(args=None,
         logger.info(f"Filtering cells with cell type {cell_type}")
         adata = adata[adata.obs[cell_type_label].isin(cell_type)]
         logger.info(f"{len(adata)} cells with cell type {cell_type} passed the filter")
+
+    if exclude_cell_type is not None:
+        logger.info(f"Filtering cells other than cell type {exclude_cell_type}")
+        adata = adata[~adata.obs[cell_type_label].isin(exclude_cell_type)]
+        logger.info(f"{len(adata)} cells with cell type {exclude_cell_type} passed the filter")
 
     if min_total_counts is not None and min_total_counts > 0:
         logger.info(f"Filtering cells with total counts < {min_total_counts}")

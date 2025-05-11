@@ -134,6 +134,8 @@ def main():
     parser.add_argument('--beta_schedule', type=str, choices=['linear', 'cosine'], default='cosine', help='Noise schedule for diffusion')
     parser.add_argument('--predict_noise', action='store_true', help='Whether model predicts noise (True) or x_0 (False)')
     parser.add_argument('--sampling_method', type=str, choices=['ddpm', 'ddim'], default='ddim', help='Sampling method for diffusion generation')
+    # parser.add_argument('--eval_samples', type=int, default=None, help='Number of samples to evaluate (None for all).')
+
     parser = setup_parser(parser)
     args = parser.parse_args()
 
@@ -229,17 +231,23 @@ def main():
     
     logger.info(f"Dataset created with {len(dataset)} samples")
     
-    # Create validation set
-    # If specific number of evaluation samples is provided, use that
-    if args.eval_samples is not None:
-        eval_size = min(args.eval_samples, len(dataset))
-        eval_indices = torch.randperm(len(dataset))[:eval_size]
-        eval_dataset = torch.utils.data.Subset(dataset, eval_indices)
-    else:
-        # Otherwise use 20% of the data for evaluation (or the whole dataset if small)
-        eval_size = min(int(0.2 * len(dataset)), len(dataset))
-        eval_indices = torch.randperm(len(dataset))[:eval_size]
-        eval_dataset = torch.utils.data.Subset(dataset, eval_indices)
+    # # Create validation set
+    # # If specific number of evaluation samples is provided, use that
+    # if args.eval_samples is not None:
+    #     eval_size = min(args.eval_samples, len(dataset))
+    #     eval_indices = torch.randperm(len(dataset))[:eval_size]
+    #     eval_dataset = torch.utils.data.Subset(dataset, eval_indices)
+    # else:
+    #     # Otherwise use 20% of the data for evaluation (or the whole dataset if small)
+    #     eval_size = min(int(0.2 * len(dataset)), len(dataset))
+    #     eval_indices = torch.randperm(len(dataset))[:eval_size]
+    #     eval_dataset = torch.utils.data.Subset(dataset, eval_indices)
+    # Split into train and validation sets
+    train_size = int(0.8 * len(dataset))
+    val_size = len(dataset) - train_size
+    _, eval_dataset = torch.utils.data.random_split(
+        dataset, [train_size, val_size]
+    )
     
     # Create data loader
     if args.model_type == 'multi':
