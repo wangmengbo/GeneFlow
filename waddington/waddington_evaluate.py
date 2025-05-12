@@ -19,13 +19,15 @@ from torchvision.models import inception_v3
 from torch.nn.functional import adaptive_avg_pool2d
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from src.single_model import RNAtoHnEModel
-from baseline.diffusion import GaussianDiffusion
 from src.utils import setup_parser, parse_adata
+from src.single_model_deprecation import RNAtoHnEModel as RNAtoHnEModel_deprecation
+from src.multi_model_deprecation import MultiCellRNAtoHnEModel as MultiCellRNAtoHnEModel_deprecation
+from src.single_model import RNAtoHnEModel
 from src.multi_model import MultiCellRNAtoHnEModel, prepare_multicell_batch
 from src.dataset import CellImageGeneDataset, PatchImageGeneDataset, patch_collate_fn
-from baseline.diffusion_train import generate_images_with_diffusion
+from waddington.waddington_energy import WaddingtonEnergy
+from waddington.waddington_rectified_flow import WaddingtonRectifiedFlow
+from waddington.waddington_train import generate_images_with_waddington
 
 # Configure logging
 logging.basicConfig(
@@ -45,43 +47,45 @@ class InceptionModel(torch.nn.Module):
             param.requires_grad = False
 
     def forward(self, x):
-        if x.shape[1] == 1:  # Handle grayscale: repeat to 3 channels
+        if x.shape[1] == 1: # Handle grayscale: repeat to 3 channels
             x = x.repeat(1, 3, 1, 1)
-        elif x.shape[1] > 3:  # Handle >3 channels: use first 3
+        elif x.shape[1] > 3: # Handle >3 channels: use first 3
             x = x[:, :3, :, :]
-            
-        # Resize if needed
+        # Else, assume 3 channels
+
         if x.shape[2] != 299 or x.shape[3] != 299:
             x = torch.nn.functional.interpolate(x, size=(299, 299), mode='bilinear', align_corners=False)
-            
-        x = (x * 2) - 1  # Assumes input images are [0, 1]
+        
+        x = (x * 2) - 1 # Assumes input images are [0, 1]
         x = self.inception_model(x)
         return x
 
-# MODIFIED Calculate FID score
+# Calculate FID score
 def calculate_fid(real_features, gen_features):
     # Need at least 2 samples to calculate covariance
     if real_features.shape[0] < 2 or gen_features.shape[0] < 2:
         return np.nan
-        
+
     mu1, sigma1 = real_features.mean(axis=0), np.cov(real_features, rowvar=False)
     mu2, sigma2 = gen_features.mean(axis=0), np.cov(gen_features, rowvar=False)
     
-    # Check for NaNs in covariance matrices
+    # Check for NaNs in covariance matrices (can happen if input features are constant)
     if np.isnan(sigma1).any() or np.isnan(sigma2).any():
         return np.nan
-        
+
     ssdiff = np.sum((mu1 - mu2) ** 2.0)
     
     try:
+        # disp=False to suppress warnings which can be verbose in a loop
         covmean, _ = linalg.sqrtm(sigma1.dot(sigma2), disp=False)
     except Exception as e:
         return np.nan
-        
+    
     if np.iscomplexobj(covmean):
         covmean = covmean.real
-        
+    
     fid = ssdiff + np.trace(sigma1 + sigma2 - 2.0 * covmean)
+    
     return fid if fid >= 0 else np.nan
 
 # Calculate SSIM and PSNR for a batch of images
@@ -96,71 +100,62 @@ def calculate_image_metrics(real_images, generated_images):
         
         real_img_rgb = real_img[:,:,:3]
         gen_img_rgb = gen_img[:,:,:3]
-        
+
         ssim_score = ssim(
-            real_img_rgb,
-            gen_img_rgb,
-            channel_axis=2,
+            real_img_rgb, 
+            gen_img_rgb, 
+            channel_axis=2, 
             data_range=1.0,
-            multichannel=True
+            multichannel=True 
         )
         
         psnr_score = psnr(
-            real_img_rgb,
-            gen_img_rgb,
+            real_img_rgb, 
+            gen_img_rgb, 
             data_range=1.0
         )
         
         ssim_scores.append(ssim_score)
         psnr_scores.append(psnr_score)
-        
+    
     return ssim_scores, psnr_scores
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate RNA to H&E model with Diffusion using FID, SSIM, and PSNR metrics.")
-    parser.add_argument('--model_path', type=str, required=True, help='Path to the pretrained model.')
-    parser.add_argument('--gene_expr', type=str, default="cell_256_aux/normalized.csv", help='Path to gene expression CSV file.')
+    parser = argparse.ArgumentParser(description="Evaluate RNA to H&E model with Waddington landscape guidance using FID, SSIM, PSNR metrics, and energy analysis.")
+    parser.add_argument('--model_path', type=str, default="cell_256_aux/output_waddington/best_single_waddington_model.pt", help='Path to the pretrained model.')
+    parser.add_argument('--gene_expr', type=str, default="cell_256_aux/input/normalized.csv", help='Path to gene expression CSV file.')
     parser.add_argument('--image_paths', type=str, default="cell_256_aux/input/cell_image_paths.json", help='Path to JSON file with image paths.')
     parser.add_argument('--patch_image_paths', type=str, default="cell_256_aux/input/patch_image_paths.json", help='Path to JSON file with patch paths.')
     parser.add_argument('--patch_cell_mapping', type=str, default="cell_256_aux/input/patch_cell_mapping.json", help='Path to JSON file with mapping paths.')
-    parser.add_argument('--output_dir', type=str, default='cell_256_aux/output_diffusion', help='Directory to save outputs.')
-    parser.add_argument('--epochs', type=int, default=10, help='Number of training epochs.')
-    parser.add_argument('--batch_size', type=int, default=20, help='Batch size for training and evaluation.')
-    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate for optimizer.')
-    parser.add_argument('--weight_decay', type=float, default=0.01, help='Weight decay for optimizer.')
+    parser.add_argument('--output_dir', type=str, default='cell_256_aux/output_waddington', help='Directory to save outputs.')
+    parser.add_argument('--output_name_prefix', type=str, default='', help='Prefix for the output evaluation files.')
+    parser.add_argument('--batch_size', type=int, default=20, help='Batch size for evaluation.')
     parser.add_argument('--img_size', type=int, default=256, help='Size of the generated images.')
-    parser.add_argument('--img_channels', type=int, default=4, help='Number of image channels (3 for RGB, 1 Greyscale).')
-    parser.add_argument('--use_amp', action='store_true', help='Use automatic mixed precision for training.')
-    parser.add_argument('--patience', type=int, default=5, help='Early stopping patience.')
-    parser.add_argument('--gen_steps', type=int, default=300, help='Number of steps for solver during generation.')
+    parser.add_argument('--img_channels', type=int, default=4, help='Number of image channels (3 for RGB, 1 auxiliary).')
+    parser.add_argument('--gen_steps', type=int, default=100, help='Number of steps for solver during generation.')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility.')
     parser.add_argument('--model_type', type=str, choices=['single', 'multi'], default='single', help='Type of model to use: single-cell or multi-cell')
     parser.add_argument('--normalize_aux', action='store_true', help='Normalize auxiliary channels.')
-    parser.add_argument('--diffusion_timesteps', type=int, default=300, help='Number of timesteps for diffusion process')
-    parser.add_argument('--beta_schedule', type=str, choices=['linear', 'cosine'], default='cosine', help='Noise schedule for diffusion')
-    parser.add_argument('--predict_noise', action='store_true', default=True, help='Whether model predicts noise (True) or x_0 (False)')
-    parser.add_argument('--sampling_method', type=str, choices=['ddpm', 'ddim'], default='ddpm', help='Sampling method for diffusion generation')
+    parser.add_argument('--guidance_strength', type=float, default=1.0, help='Strength of energy guidance during generation.')
     
     parser = setup_parser(parser)
     args = parser.parse_args()
-    
+
     os.makedirs(args.output_dir, exist_ok=True)
-    
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
     
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
-    
+
     if args.adata is not None:
         logger.info(f"Loading AnnData from {args.adata}")
         expr_df, missing_gene_symbols = parse_adata(args)
     else:
         logger.info(f"Loading gene expression data from {args.gene_expr}")
         expr_df = pd.read_csv(args.gene_expr, index_col=0)
-    
     logger.info(f"Loaded gene expression data with shape: {expr_df.shape}")
-    
+
     if args.model_type == 'single':
         logger.info("Creating single-cell dataset")
         if args.image_paths:
@@ -171,12 +166,8 @@ def main():
             logger.info(f"Loaded {len(image_paths)} valid cell image paths")
         else: 
             image_paths = {}
-            
         dataset = CellImageGeneDataset(
-            expr_df, 
-            image_paths, 
-            img_size=args.img_size, 
-            img_channels=args.img_channels,
+            expr_df, image_paths, img_size=args.img_size, img_channels=args.img_channels,
             transform=transforms.Compose([transforms.ToTensor(), transforms.Resize((args.img_size, args.img_size), antialias=True)]),
             missing_gene_symbols=missing_gene_symbols if 'missing_gene_symbols' in locals() else None,
             normalize_aux=args.normalize_aux,
@@ -185,7 +176,6 @@ def main():
         logger.info("Creating multi-cell dataset")
         with open(args.patch_cell_mapping, "r") as f: 
             patch_to_cells = json.load(f)
-            
         if args.patch_image_paths:
             logger.info(f"Loading patch image paths from {args.patch_image_paths}")
             with open(args.patch_image_paths, "r") as f: 
@@ -194,96 +184,110 @@ def main():
             logger.info(f"Loaded {len(patch_image_paths)} valid patch image paths")
         else: 
             patch_image_paths = {}
-            
         dataset = PatchImageGeneDataset(
-            expr_df=expr_df, 
-            patch_image_paths=patch_image_paths, 
-            patch_to_cells=patch_to_cells,
-            img_size=args.img_size, 
-            img_channels=args.img_channels,
+            expr_df=expr_df, patch_image_paths=patch_image_paths, patch_to_cells=patch_to_cells,
+            img_size=args.img_size, img_channels=args.img_channels,
             transform=transforms.Compose([transforms.ToTensor(), transforms.Resize((args.img_size, args.img_size), antialias=True)]),
             normalize_aux=args.normalize_aux,
         )
-    
     logger.info(f"Dataset created with {len(dataset)} samples")
-    
+
     # Split into train and validation sets
     train_size = int(0.8 * len(dataset))
     val_size = len(dataset) - train_size
     _, eval_dataset = torch.utils.data.random_split(
         dataset, [train_size, val_size]
     )
-    
+
     collate_fn_to_use = patch_collate_fn if args.model_type == 'multi' else None
     eval_loader = DataLoader(
-        eval_dataset, 
-        batch_size=args.batch_size, 
-        shuffle=False,
-        num_workers=4, 
-        pin_memory=True, 
-        collate_fn=collate_fn_to_use
+        eval_dataset, batch_size=args.batch_size, shuffle=False,
+        num_workers=4, pin_memory=True, collate_fn=collate_fn_to_use
     )
-    
     logger.info(f"Evaluation set size: {len(eval_dataset)}")
-    
+
     gene_dim = expr_df.shape[1]
-    args.relation_rank = getattr(args, 'relation_rank', 16)
+    args.relation_rank = getattr(args, 'relation_rank', 16) 
     args.concat_mask = getattr(args, 'concat_mask', False)
-    
+
     model_constructor_args = dict(
-        rna_dim=gene_dim, 
-        img_channels=args.img_channels, 
-        img_size=args.img_size,
-        model_channels=128, 
-        num_res_blocks=2, 
-        attention_resolutions=(16,),
-        dropout=0.1, 
-        channel_mult=(1, 2, 2, 2), 
-        use_checkpoint=False,
-        num_heads=2, 
-        num_head_channels=16, 
-        use_scale_shift_norm=True,
-        resblock_updown=True, 
-        use_new_attention_order=True, 
-        concat_mask=args.concat_mask,
+        rna_dim=gene_dim, img_channels=args.img_channels, img_size=args.img_size,
+        model_channels=128, num_res_blocks=2, attention_resolutions=(16,),
+        dropout=0.1, channel_mult=(1, 2, 2, 2), use_checkpoint=False,
+        num_heads=2, num_head_channels=16, use_scale_shift_norm=True,
+        resblock_updown=True, use_new_attention_order=True, concat_mask=args.concat_mask,
     )
-    
+
     logger.info(f"Loading pretrained model from {args.model_path}")
     checkpoint = torch.load(args.model_path, map_location=device)
     
-    if args.model_type == 'single':
-        model = RNAtoHnEModel(**model_constructor_args, relation_rank=args.relation_rank)
-    else:
-        model = MultiCellRNAtoHnEModel(**model_constructor_args, relation_rank=args.relation_rank)
-    
-    model.load_state_dict(checkpoint["model"])
+    # Try loading with standard model first
+    model = None
+    try:
+        if args.model_type == 'single':
+            model = RNAtoHnEModel(**model_constructor_args)
+        else:
+            model = MultiCellRNAtoHnEModel(**model_constructor_args, relation_rank=args.relation_rank)
+        model.load_state_dict(checkpoint["model"])
+    except Exception as e:
+        logger.error(f"Failed to load model with current constructor: {e}")
+        logger.warning(f"Attempting to load model with deprecated constructor.")
+        if args.model_type == 'single':
+            model = RNAtoHnEModel_deprecation(**model_constructor_args)
+        else:
+            model = MultiCellRNAtoHnEModel_deprecation(**model_constructor_args, relation_rank=args.relation_rank)
+        model.load_state_dict(checkpoint["model"])
+        
     logger.info(f"Model loaded successfully")
     model.to(device)
     model.eval()
     
-    diffusion = GaussianDiffusion(
-        timesteps=args.diffusion_timesteps,
-        beta_schedule=args.beta_schedule,
-        predict_noise=args.predict_noise,
-        device=device
+    # Load or initialize the Waddington energy model
+    energy_params = {
+        'gene_dim': gene_dim,
+        'hidden_dim': checkpoint.get('energy_hidden_dim', 128),
+        'energy_scale': checkpoint.get('energy_scale', 1.0),
+        'num_attractor_states': checkpoint.get('num_attractor_states', 5),
+        'img_size': args.img_size,
+        'img_channels': args.img_channels
+    }
+    
+    waddington_energy = WaddingtonEnergy(**energy_params)
+    
+    if "waddington_energy" in checkpoint:
+        waddington_energy.load_state_dict(checkpoint["waddington_energy"])
+        logger.info("Waddington energy model loaded from checkpoint")
+    else:
+        logger.warning("No Waddington energy model found in checkpoint")
+    
+    waddington_energy.to(device)
+    waddington_energy.eval()
+    
+    # Initialize the Waddington-guided rectified flow
+    waddington_flow = WaddingtonRectifiedFlow(
+        sigma_min=0.002, 
+        sigma_max=80.0, 
+        energy_weight=checkpoint.get('energy_weight', 0.1)
     )
+    waddington_flow.waddington_energy = waddington_energy
     
     inception_model = InceptionModel(device)
     
     all_ssim = []
     all_psnr = []
-    all_real_features_for_fid = []
-    all_gen_features_for_fid = []
+    all_real_features_for_fid = [] 
+    all_gen_features_for_fid = []   
+    all_energy_values = []
     per_sample_metrics_list = []
     all_batch_fids_list = []
-    
+
     logger.info(f"Starting evaluation on {len(eval_loader)} batches")
     
     with torch.no_grad():
         for batch_idx, batch in enumerate(tqdm(eval_loader, desc="Evaluating")):
             sample_ids_in_batch = []
             real_images = batch['image'].to(device)
-            
+
             if args.model_type == 'single':
                 gene_expr = batch['gene_expr'].to(device)
                 sample_ids_in_batch = batch['cell_id']
@@ -291,92 +295,114 @@ def main():
                 if gene_mask is not None: 
                     gene_mask = gene_mask.to(device)
                 
-                generated_images = generate_images_with_diffusion(
+                # Calculate energy for each sample
+                energy_values = waddington_energy(gene_expr).cpu().numpy()
+                
+                # Generate images with Waddington guidance
+                generated_images = generate_images_with_waddington(
                     model=model,
-                    diffusion=diffusion,
+                    waddington_flow=waddington_flow,
                     gene_expr=gene_expr,
                     device=device,
                     num_steps=args.gen_steps,
                     gene_mask=gene_mask,
                     is_multi_cell=False,
-                    method=args.sampling_method
+                    guidance_strength=args.guidance_strength
                 )
-            else:
+            else: 
                 processed_batch = prepare_multicell_batch(batch, device)
                 gene_expr = processed_batch['gene_expr']
                 num_cells = processed_batch.get('num_cells')
                 sample_ids_in_batch = batch['patch_id']
                 
-                generated_images = generate_images_with_diffusion(
+                # Calculate energy for each sample (using average gene expression for multi-cell)
+                if len(gene_expr.shape) == 3:  # (batch, cells, genes)
+                    avg_gene_expr = gene_expr.mean(dim=1)  # Average over cells
+                    energy_values = waddington_energy(avg_gene_expr).cpu().numpy()
+                else:
+                    energy_values = waddington_energy(gene_expr).cpu().numpy()
+                
+                # Generate images with Waddington guidance
+                generated_images = generate_images_with_waddington(
                     model=model,
-                    diffusion=diffusion,
+                    waddington_flow=waddington_flow,
                     gene_expr=gene_expr,
                     device=device,
                     num_steps=args.gen_steps,
                     num_cells=num_cells,
                     is_multi_cell=True,
-                    method=args.sampling_method
+                    guidance_strength=args.guidance_strength
                 )
             
+            # Extract features for FID calculation
             real_features_batch = inception_model(real_images)
             gen_features_batch = inception_model(generated_images)
             
             all_real_features_for_fid.append(real_features_batch.cpu().numpy())
             all_gen_features_for_fid.append(gen_features_batch.cpu().numpy())
+            all_energy_values.extend(energy_values)
             
+            # Calculate SSIM and PSNR
             ssim_scores, psnr_scores = calculate_image_metrics(real_images, generated_images)
             all_ssim.extend(ssim_scores)
             all_psnr.extend(psnr_scores)
-            
+
+            # Calculate feature distances for each sample
             per_sample_feat_dists = []
             for i in range(real_features_batch.shape[0]):
                 r_feat = real_features_batch[i].cpu().numpy()
                 g_feat = gen_features_batch[i].cpu().numpy()
                 distance = np.linalg.norm(r_feat - g_feat)
                 per_sample_feat_dists.append(distance)
-            
+
             # Per-Batch FID Calculation
-            fid_batch = np.nan
             real_features_batch_np = real_features_batch.cpu().numpy()
             gen_features_batch_np = gen_features_batch.cpu().numpy()
-            
             fid_batch = calculate_fid(real_features_batch_np, gen_features_batch_np)
+            
             if not np.isnan(fid_batch):
                 all_batch_fids_list.append(fid_batch)
             else:
                 logger.debug(f"FID for batch {batch_idx} is NaN (batch size: {real_features_batch_np.shape[0]}).")
-            
+
+            # Store per-sample metrics
             for i in range(len(ssim_scores)):
                 per_sample_metrics_list.append({
                     'sample_id': sample_ids_in_batch[i],
                     'ssim': ssim_scores[i],
                     'psnr': psnr_scores[i],
                     'inception_feature_distance': per_sample_feat_dists[i],
+                    'energy': energy_values[i] if i < len(energy_values) else np.nan,
                     'batch_fid': fid_batch
                 })
     
     # Global FID
-    global_fid_score = np.nan
+    global_fid_score = np.nan 
     if len(all_real_features_for_fid) > 0 and len(all_gen_features_for_fid) > 0:
         all_real_features_np = np.concatenate(all_real_features_for_fid, axis=0)
         all_gen_features_np = np.concatenate(all_gen_features_for_fid, axis=0)
-        
         global_fid_score = calculate_fid(all_real_features_np, all_gen_features_np)
         if np.isnan(global_fid_score):
-            logger.warning(f"Global FID calculation resulted in NaN (total samples: {all_real_features_np.shape[0]}). Check feature quality or sample count.")
+            logger.warning(f"Global FID calculation resulted in NaN (total samples: {all_real_features_np.shape[0]}).")
     else:
         logger.warning("No features collected for global FID calculation.")
-    
+
+    # Calculate statistics
     ssim_mean, ssim_std = (np.mean(all_ssim), np.std(all_ssim)) if all_ssim else (np.nan, np.nan)
     psnr_mean, psnr_std = (np.mean(all_psnr), np.std(all_psnr)) if all_psnr else (np.nan, np.nan)
     
     all_feat_dists = [item['inception_feature_distance'] for item in per_sample_metrics_list if 'inception_feature_distance' in item]
     feat_dist_mean, feat_dist_std = (np.mean(all_feat_dists), np.std(all_feat_dists)) if all_feat_dists else (np.nan, np.nan)
-    
-    # Calculate mean/std for per-batch FID scores
+
+    # Energy statistics
+    energy_mean, energy_std = (np.mean(all_energy_values), np.std(all_energy_values)) if all_energy_values else (np.nan, np.nan)
+    energy_min, energy_max = (np.min(all_energy_values), np.max(all_energy_values)) if all_energy_values else (np.nan, np.nan)
+
+    # Batch FID statistics
     batch_fid_mean = np.mean(all_batch_fids_list) if all_batch_fids_list else np.nan
     batch_fid_std = np.std(all_batch_fids_list) if all_batch_fids_list else np.nan
-    
+
+    # Metrics summary
     metrics_summary = {
         'global_fid': float(global_fid_score) if not np.isnan(global_fid_score) else None,
         'ssim_mean': float(ssim_mean) if not np.isnan(ssim_mean) else None,
@@ -388,32 +414,40 @@ def main():
         'batch_fid_mean': float(batch_fid_mean) if not np.isnan(batch_fid_mean) else None,
         'batch_fid_std': float(batch_fid_std) if not np.isnan(batch_fid_std) else None,
         'num_valid_batch_fids': len(all_batch_fids_list),
-        'num_samples': len(all_ssim) if all_ssim else 0,
-        'sampling_method': args.sampling_method
+        'energy_mean': float(energy_mean) if not np.isnan(energy_mean) else None,
+        'energy_std': float(energy_std) if not np.isnan(energy_std) else None,
+        'energy_min': float(energy_min) if not np.isnan(energy_min) else None,
+        'energy_max': float(energy_max) if not np.isnan(energy_max) else None,
+        'num_samples': len(all_ssim) if all_ssim else 0
     }
     
     # Construct output filenames with prefix
     prefix = args.output_name_prefix if args.output_name_prefix else ""
     if prefix and not prefix.endswith("_"):
         prefix += "_"
+
+    summary_filename = f"{prefix}waddington_metrics_summary.json"
+    csv_filename = f"{prefix}waddington_per_sample_metrics.csv"
+    plot_filename = f"{prefix}waddington_metric_distributions.png"
+    energy_plot_filename = f"{prefix}waddington_energy_distribution.png"
     
-    summary_filename = f"{prefix}diffusion_metrics_summary.json"
-    csv_filename = f"{prefix}diffusion_per_sample_metrics.csv"
-    plot_filename = f"{prefix}diffusion_metric_distributions.png"
-    
+    # Save metrics summary
     with open(os.path.join(args.output_dir, summary_filename), 'w') as f:
         json.dump(metrics_summary, f, indent=2)
     logger.info(f"Metrics summary saved to {os.path.join(args.output_dir, summary_filename)}")
     
+    # Save per-sample metrics
     if per_sample_metrics_list:
         per_sample_df = pd.DataFrame(per_sample_metrics_list)
         csv_output_path = os.path.join(args.output_dir, csv_filename)
         per_sample_df.to_csv(csv_output_path, index=False)
-        logger.info(f"Per-sample metrics (including batch_fid) saved to {csv_output_path}")
+        logger.info(f"Per-sample metrics saved to {csv_output_path}")
     else:
         logger.info("No per-sample metrics to save.")
-    
+
+    # Create SSIM/PSNR distribution plots
     plt.figure(figsize=(12, 5))
+    
     plt.subplot(1, 2, 1)
     if all_ssim:
         plt.hist(all_ssim, bins=20, alpha=0.7)
@@ -439,6 +473,74 @@ def main():
     plt.savefig(plot_output_path)
     logger.info(f"Metric distributions plot saved to {plot_output_path}")
     
+    # Create energy distribution plot
+    plt.figure(figsize=(10, 6))
+    if all_energy_values:
+        plt.hist(all_energy_values, bins=30, alpha=0.7)
+        plt.axvline(energy_mean, color='r', ls='dashed', lw=2, label=f'Mean: {energy_mean:.4f}')
+        plt.title(f'Waddington Energy Distribution')
+        plt.xlabel('Energy Value')
+        plt.ylabel('Count')
+        plt.legend()
+        plt.grid(alpha=0.3)
+    else:
+        plt.title('Waddington Energy Distribution (No data)')
+    
+    energy_plot_path = os.path.join(args.output_dir, energy_plot_filename)
+    plt.savefig(energy_plot_path)
+    logger.info(f"Energy distribution plot saved to {energy_plot_path}")
+    
+    # Additional analysis: correlation between energy and image metrics
+    if all_energy_values and all_ssim and all_psnr:
+        plt.figure(figsize=(15, 5))
+        
+        # Energy vs SSIM scatter plot
+        plt.subplot(1, 3, 1)
+        plt.scatter(all_energy_values, all_ssim, alpha=0.5)
+        plt.xlabel('Waddington Energy')
+        plt.ylabel('SSIM')
+        plt.title('Energy vs SSIM')
+        corr_energy_ssim = np.corrcoef(all_energy_values, all_ssim)[0, 1]
+        plt.annotate(f'Correlation: {corr_energy_ssim:.4f}', 
+                     xy=(0.05, 0.95), xycoords='axes fraction')
+        
+        # Energy vs PSNR scatter plot
+        plt.subplot(1, 3, 2)
+        plt.scatter(all_energy_values, all_psnr, alpha=0.5)
+        plt.xlabel('Waddington Energy')
+        plt.ylabel('PSNR')
+        plt.title('Energy vs PSNR')
+        corr_energy_psnr = np.corrcoef(all_energy_values, all_psnr)[0, 1]
+        plt.annotate(f'Correlation: {corr_energy_psnr:.4f}', 
+                     xy=(0.05, 0.95), xycoords='axes fraction')
+        
+        # Energy vs Feature Distance scatter plot
+        plt.subplot(1, 3, 3)
+        plt.scatter(all_energy_values, all_feat_dists, alpha=0.5)
+        plt.xlabel('Waddington Energy')
+        plt.ylabel('Feature Distance')
+        plt.title('Energy vs Feature Distance')
+        corr_energy_feat = np.corrcoef(all_energy_values, all_feat_dists)[0, 1]
+        plt.annotate(f'Correlation: {corr_energy_feat:.4f}', 
+                     xy=(0.05, 0.95), xycoords='axes fraction')
+        
+        plt.tight_layout()
+        corr_plot_path = os.path.join(args.output_dir, f"{prefix}waddington_energy_correlations.png")
+        plt.savefig(corr_plot_path)
+        logger.info(f"Energy correlation plots saved to {corr_plot_path}")
+        
+        # Add correlations to metrics summary
+        metrics_summary.update({
+            'energy_ssim_correlation': float(corr_energy_ssim) if not np.isnan(corr_energy_ssim) else None,
+            'energy_psnr_correlation': float(corr_energy_psnr) if not np.isnan(corr_energy_psnr) else None,
+            'energy_featdist_correlation': float(corr_energy_feat) if not np.isnan(corr_energy_feat) else None,
+        })
+        
+        # Save updated metrics summary
+        with open(os.path.join(args.output_dir, summary_filename), 'w') as f:
+            json.dump(metrics_summary, f, indent=2)
+    
+    # Print evaluation results
     logger.info(f"=== Evaluation Results (Aggregated) ===")
     if metrics_summary['num_samples'] > 0:
         logger.info(f"Number of samples: {metrics_summary['num_samples']}")
@@ -450,7 +552,17 @@ def main():
         if metrics_summary['num_valid_batch_fids'] > 0:
             logger.info(f"Per-Batch FID (Mean over {metrics_summary['num_valid_batch_fids']} batches): {metrics_summary['batch_fid_mean']:.4f} ± {metrics_summary['batch_fid_std']:.4f}")
         else:
-            logger.info("Per-Batch FID: N/A (no valid batches or all resulted in NaN)")
+            logger.info("Per-Batch FID: N/A (no valid batches)")
+            
+        # Waddington-specific metrics
+        logger.info(f"Waddington Energy: {metrics_summary['energy_mean']:.4f} ± {metrics_summary['energy_std']:.4f}" if metrics_summary['energy_mean'] is not None else "Energy: N/A")
+        logger.info(f"Energy Range: [{metrics_summary['energy_min']:.4f}, {metrics_summary['energy_max']:.4f}]" if metrics_summary['energy_min'] is not None else "Energy Range: N/A")
+        
+        # Print correlations if available
+        if 'energy_ssim_correlation' in metrics_summary and metrics_summary['energy_ssim_correlation'] is not None:
+            logger.info(f"Energy-SSIM Correlation: {metrics_summary['energy_ssim_correlation']:.4f}")
+            logger.info(f"Energy-PSNR Correlation: {metrics_summary['energy_psnr_correlation']:.4f}")
+            logger.info(f"Energy-Feature Distance Correlation: {metrics_summary['energy_featdist_correlation']:.4f}")
     else:
         logger.info("No samples were evaluated.")
     

@@ -27,6 +27,7 @@ from src.single_model import RNAtoHnEModel
 from src.multi_model import MultiCellRNAtoHnEModel, prepare_multicell_batch
 from src.dataset import CellImageGeneDataset, PatchImageGeneDataset, patch_collate_fn
 from rectified.rectified_train import generate_images_with_rectified_flow
+from src.stain_normalization import normalize_staining_rgb_skimage_hist_match # Added import
 
 # Configure logging
 logging.basicConfig(
@@ -39,87 +40,99 @@ logger = logging.getLogger(__name__)
 class InceptionModel(torch.nn.Module):
     def __init__(self, device):
         super().__init__()
-        self.inception_model = inception_v3(pretrained=True, transform_input=False).to(device)
+        self.inception_model = inception_v3(weights='IMAGENET1K_V1', transform_input=False).to(device) # Use updated weights argument
         self.inception_model.eval()
         self.inception_model.fc = torch.nn.Identity()
         for param in self.inception_model.parameters():
             param.requires_grad = False
 
     def forward(self, x):
+        # Input x expected to be in [0, 1] range, B,C,H,W
+        # Handle channel differences for InceptionV3 input
         if x.shape[1] == 1: # Handle grayscale: repeat to 3 channels
             x = x.repeat(1, 3, 1, 1)
         elif x.shape[1] > 3: # Handle >3 channels: use first 3
             x = x[:, :3, :, :]
-        # Else, assume 3 channels
+        # Else, assume 3 channels and x is B,3,H,W
 
+        # Preprocessing for InceptionV3: normalize to [-1, 1] and resize
+        # InceptionV3 expects 299x299 images
         if x.shape[2] != 299 or x.shape[3] != 299:
             x = torch.nn.functional.interpolate(x, size=(299, 299), mode='bilinear', align_corners=False)
         
-        x = (x * 2) - 1 # Assumes input images are [0, 1]
+        # Normalize to [-1, 1] if input is [0, 1]
+        # The original InceptionV3 script often assumes [-1,1] input.
+        # If your ToTensor transform normalizes to [0,1], this step is needed.
+        x = (x * 2) - 1
+        
         x = self.inception_model(x)
         return x
 
 # MODIFIED Calculate FID score
 def calculate_fid(real_features, gen_features):
-    # Need at least 2 samples to calculate covariance
     if real_features.shape[0] < 2 or gen_features.shape[0] < 2:
-        # logger.debug("FID calculation requires at least 2 samples per set.")
         return np.nan
 
     mu1, sigma1 = real_features.mean(axis=0), np.cov(real_features, rowvar=False)
     mu2, sigma2 = gen_features.mean(axis=0), np.cov(gen_features, rowvar=False)
     
-    # Check for NaNs in covariance matrices (can happen if input features are constant)
-    if np.isnan(sigma1).any() or np.isnan(sigma2).any():
-        # logger.debug("NaNs in covariance matrix during FID calculation.")
+    if np.isnan(sigma1).any() or np.isnan(sigma2).any() or np.isinf(sigma1).any() or np.isinf(sigma2).any():
         return np.nan
 
     ssdiff = np.sum((mu1 - mu2) ** 2.0)
     
     try:
-        # disp=False to suppress warnings which can be verbose in a loop
         covmean, _ = linalg.sqrtm(sigma1.dot(sigma2), disp=False)
-    except Exception as e:
-        # logger.debug(f"Error in linalg.sqrtm during FID: {e}")
+    except Exception:
         return np.nan
     
     if np.iscomplexobj(covmean):
         covmean = covmean.real
     
     fid = ssdiff + np.trace(sigma1 + sigma2 - 2.0 * covmean)
-    
-    return fid if fid >= 0 else np.nan
+    return fid if fid >= 0 and not np.isnan(fid) and not np.isinf(fid) else np.nan
 
 
-# Calculate SSIM and PSNR for a batch of images (Original)
-def calculate_image_metrics(real_images, generated_images):
-    batch_size = real_images.shape[0]
+# Calculate SSIM and PSNR for a batch of images
+def calculate_image_metrics(real_images_batch, generated_images_batch):
+    # Expects PyTorch Tensors (B, C, H, W) in range [0,1]
+    batch_size = real_images_batch.shape[0]
     ssim_scores = []
     psnr_scores = []
     
     for i in range(batch_size):
-        real_img = real_images[i].cpu().numpy().transpose(1, 2, 0)
-        gen_img = generated_images[i].cpu().numpy().transpose(1, 2, 0)
+        # Convert to H, W, C numpy arrays
+        real_img_np = real_images_batch[i].cpu().numpy().transpose(1, 2, 0)
+        gen_img_np = generated_images_batch[i].cpu().numpy().transpose(1, 2, 0)
         
-        real_img_rgb = real_img[:,:,:3]
-        gen_img_rgb = gen_img[:,:,:3]
+        # Ensure they are in [0,1] for metrics
+        real_img_np = np.clip(real_img_np, 0, 1)
+        gen_img_np = np.clip(gen_img_np, 0, 1)
 
-        ssim_score = ssim(
+        # Metrics are typically calculated on RGB
+        real_img_rgb = real_img_np[:,:,:3]
+        gen_img_rgb = gen_img_np[:,:,:3]
+
+        # Data range for ssim/psnr for float images is typically 1.0 (max-min)
+        # For uint8 it would be 255.
+        # Our images are float [0,1]
+        data_range = 1.0 
+
+        current_ssim = ssim(
             real_img_rgb, 
             gen_img_rgb, 
-            channel_axis=2, 
-            data_range=1.0,
-            multichannel=True 
+            channel_axis=2, # formerly multichannel=True, new skimage uses channel_axis
+            data_range=data_range
         )
         
-        psnr_score = psnr(
+        current_psnr = psnr(
             real_img_rgb, 
             gen_img_rgb, 
-            data_range=1.0
+            data_range=data_range
         )
         
-        ssim_scores.append(ssim_score)
-        psnr_scores.append(psnr_score)
+        ssim_scores.append(current_ssim)
+        psnr_scores.append(current_psnr)
     
     return ssim_scores, psnr_scores
 
@@ -131,23 +144,14 @@ def main():
     parser.add_argument('--patch_image_paths', type=str, default="cell_256_aux/input/patch_image_paths.json", help='Path to JSON file with patch paths.')
     parser.add_argument('--patch_cell_mapping', type=str, default="cell_256_aux/input/patch_cell_mapping.json", help='Path to JSON file with mapping paths.')
     parser.add_argument('--output_dir', type=str, default='cell_256_aux/output_rectified', help='Directory to save outputs.')
-    # <<< START MODIFICATION >>>
-    parser.add_argument('--output_name_prefix', type=str, default='', help='Prefix for the output evaluation files.')
-    # <<< END MODIFICATION >>>
-    parser.add_argument('--epochs', type=int, default=10, help='Number of training epochs.')
-    parser.add_argument('--batch_size', type=int, default=20, help='Batch size for training and evaluation.')
-    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate for optimizer.')
-    parser.add_argument('--weight_decay', type=float, default=0.01, help='Weight decay for optimizer.')
+    parser.add_argument('--batch_size', type=int, default=20, help='Batch size for evaluation.')
     parser.add_argument('--img_size', type=int, default=256, help='Size of the generated images.')
-    parser.add_argument('--img_channels', type=int, default=4, help='Number of image channels (3 for RGB, 1 Greyscale).')
-    parser.add_argument('--use_amp', action='store_true', help='Use automatic mixed precision for training.')
-    parser.add_argument('--patience', type=int, default=5, help='Early stopping patience.')
+    parser.add_argument('--img_channels', type=int, default=4, help='Number of image channels.')
     parser.add_argument('--gen_steps', type=int, default=100, help='Number of steps for solver during generation.')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility.')
     parser.add_argument('--model_type', type=str, choices=['single', 'multi'], default='single', help='Type of model to use: single-cell or multi-cell')
-    parser.add_argument('--normalize_aux', action='store_true', help='Normalize auxiliary channels.')
-    # parser.add_argument('--eval_samples', type=int, default=None, help='Number of samples to evaluate (None for all).')
-
+    parser.add_argument('--normalize_aux', action='store_true', help='Normalize auxiliary channels during dataset loading.')
+    # Arguments for stain normalization and others will be added by setup_parser
     parser = setup_parser(parser)
     args = parser.parse_args()
 
@@ -158,230 +162,284 @@ def main():
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
+    missing_gene_symbols_list = None # Initialize
     if args.adata is not None:
         logger.info(f"Loading AnnData from {args.adata}")
-        expr_df, missing_gene_symbols = parse_adata(args)
+        expr_df, missing_gene_symbols_list = parse_adata(args)
     else:
         logger.info(f"Loading gene expression data from {args.gene_expr}")
         expr_df = pd.read_csv(args.gene_expr, index_col=0)
     logger.info(f"Loaded gene expression data with shape: {expr_df.shape}")
 
+    # Determine dataset for evaluation (e.g., validation split)
+    # This part is simplified; in a full setup, you'd split train/val/test properly
     if args.model_type == 'single':
-        logger.info("Creating single-cell dataset")
+        logger.info("Creating single-cell dataset for evaluation")
+        image_paths_dict = {}
         if args.image_paths:
             logger.info(f"Loading image paths from {args.image_paths}")
-            with open(args.image_paths, "r") as f: image_paths_data = json.load(f) # Renamed to avoid conflict
-            image_paths = {k: v for k, v in image_paths_data.items() if os.path.exists(v)}
-            logger.info(f"Loaded {len(image_paths)} valid cell image paths")
-        else: image_paths = {}
-        dataset = CellImageGeneDataset(
-            expr_df, image_paths, img_size=args.img_size, img_channels=args.img_channels,
+            with open(args.image_paths, "r") as f: image_paths_data = json.load(f)
+            image_paths_dict = {k: v for k, v in image_paths_data.items() if os.path.exists(v)}
+            logger.info(f"Loaded {len(image_paths_dict)} valid cell image paths")
+        
+        full_dataset = CellImageGeneDataset(
+            expr_df, image_paths_dict, img_size=args.img_size, img_channels=args.img_channels,
             transform=transforms.Compose([transforms.ToTensor(), transforms.Resize((args.img_size, args.img_size), antialias=True)]),
-            missing_gene_symbols=missing_gene_symbols if 'missing_gene_symbols' in locals() else None,
+            missing_gene_symbols=missing_gene_symbols_list,
             normalize_aux=args.normalize_aux,
         )
-    else:
-        logger.info("Creating multi-cell dataset")
+    else: # multi-cell
+        logger.info("Creating multi-cell dataset for evaluation")
+        patch_image_paths_dict = None
         with open(args.patch_cell_mapping, "r") as f: patch_to_cells = json.load(f)
         if args.patch_image_paths:
             logger.info(f"Loading patch image paths from {args.patch_image_paths}")
-            with open(args.patch_image_paths, "r") as f: patch_image_paths_data = json.load(f) # Renamed
-            patch_image_paths = {k: v for k, v in patch_image_paths_data.items() if os.path.exists(v)}
-            logger.info(f"Loaded {len(patch_image_paths)} valid patch image paths")
-        else: patch_image_paths = {}
-        dataset = PatchImageGeneDataset(
-            expr_df=expr_df, patch_image_paths=patch_image_paths, patch_to_cells=patch_to_cells,
+            with open(args.patch_image_paths, "r") as f: patch_image_paths_data = json.load(f)
+            patch_image_paths_dict = {k: v for k, v in patch_image_paths_data.items() if os.path.exists(v)}
+            logger.info(f"Loaded {len(patch_image_paths_dict)} valid patch image paths")
+        
+        full_dataset = PatchImageGeneDataset(
+            expr_df=expr_df, patch_image_paths=patch_image_paths_dict, patch_to_cells=patch_to_cells,
             img_size=args.img_size, img_channels=args.img_channels,
             transform=transforms.Compose([transforms.ToTensor(), transforms.Resize((args.img_size, args.img_size), antialias=True)]),
             normalize_aux=args.normalize_aux,
         )
-    logger.info(f"Dataset created with {len(dataset)} samples")
+    
+    if len(full_dataset) == 0:
+        logger.error("Full dataset is empty. Cannot proceed with evaluation.")
+        return
 
-    # if args.eval_samples is not None:
-    #     eval_size = min(args.eval_samples, len(dataset))
-    #     eval_indices = torch.randperm(len(dataset))[:eval_size].tolist()
+    # # Example: Use a 20% split for validation/evaluation or all if dataset is small
+    # eval_size = int(0.2 * len(full_dataset)) if len(full_dataset) > args.batch_size else len(full_dataset)
+    # if eval_size == 0 and len(full_dataset) > 0: eval_size = len(full_dataset)
+    
+    # if eval_size < len(full_dataset):
+    #     _, eval_dataset = torch.utils.data.random_split(full_dataset, [len(full_dataset) - eval_size, eval_size])
     # else:
-    #     eval_size = min(int(0.2 * len(dataset)), len(dataset))
-    #     if eval_size == 0 and len(dataset) > 0: eval_size = len(dataset)
-    #     eval_indices = torch.randperm(len(dataset))[:eval_size].tolist()
+    #     eval_dataset = full_dataset # Use the whole dataset if 20% is too small or 0
     
-    # if not eval_indices and len(dataset) > 0 : # If 20% is 0, but dataset is not empty, take all
-    #     logger.warning("Evaluation set was empty after sampling, using all dataset samples for evaluation.")
-    #     eval_indices = list(range(len(dataset)))
-    
-    # eval_dataset = torch.utils.data.Subset(dataset, eval_indices) if eval_indices else []
-
-
-    # if not eval_dataset:
-    #     logger.error("Evaluation dataset is empty. Exiting.")
-    #     return
-
     # Split into train and validation sets
-    train_size = int(0.8 * len(dataset))
-    val_size = len(dataset) - train_size
+    train_size = int(0.8 * len(full_dataset))
+    val_size = len(full_dataset) - train_size
     _, eval_dataset = torch.utils.data.random_split(
-        dataset, [train_size, val_size]
+        full_dataset, [train_size, val_size]
     )
+
+    if len(eval_dataset) == 0:
+        logger.error("Evaluation dataset is empty after splitting. Exiting.")
+        return
 
     collate_fn_to_use = patch_collate_fn if args.model_type == 'multi' else None
     eval_loader = DataLoader(
         eval_dataset, batch_size=args.batch_size, shuffle=False,
-        num_workers=4, pin_memory=True, collate_fn=collate_fn_to_use
+        num_workers=min(os.cpu_count(), 4), pin_memory=True, collate_fn=collate_fn_to_use
     )
     logger.info(f"Evaluation set size: {len(eval_dataset)}")
 
     gene_dim = expr_df.shape[1]
-    args.relation_rank = getattr(args, 'relation_rank', 16) 
-    args.concat_mask = getattr(args, 'concat_mask', False)
+    
+    # --- Model Loading with Config Consistency ---
+    logger.info(f"Loading pretrained model from {args.model_path}")
+    try:
+        checkpoint = torch.load(args.model_path, map_location=device)
+    except FileNotFoundError:
+        logger.error(f"Model checkpoint not found at {args.model_path}")
+        return
+        
+    model_state = checkpoint.get("model", checkpoint)
+    model_config_ckpt = checkpoint.get("config", {})
+
+    # Prioritize config from checkpoint for critical architectural params
+    ckpt_img_channels = model_config_ckpt.get('img_channels', args.img_channels)
+    ckpt_img_size = model_config_ckpt.get('img_size', args.img_size)
+    ckpt_model_type = model_config_ckpt.get('model_type', args.model_type)
+    # Update args if you want them to reflect checkpoint's settings for model init
+    args.img_channels = ckpt_img_channels
+    args.img_size = ckpt_img_size
+    # args.model_type = ckpt_model_type # Be careful if script logic depends heavily on cmd line model_type
 
     model_constructor_args = dict(
         rna_dim=gene_dim, img_channels=args.img_channels, img_size=args.img_size,
-        model_channels=128, num_res_blocks=2, attention_resolutions=(16,),
-        dropout=0.1, channel_mult=(1, 2, 2, 2), use_checkpoint=False,
+        model_channels=128, num_res_blocks=2, attention_resolutions=(16,), #ensure tuple
+        dropout=0.1, channel_mult=(1, 2, 2, 2), use_checkpoint=False, #ensure tuple
         num_heads=2, num_head_channels=16, use_scale_shift_norm=True,
-        resblock_updown=True, use_new_attention_order=True, concat_mask=args.concat_mask,
+        resblock_updown=True, use_new_attention_order=True,
+        concat_mask= model_config_ckpt.get('concat_mask', args.concat_mask), # from checkpoint or args
+        relation_rank= model_config_ckpt.get('relation_rank', args.relation_rank if hasattr(args, 'relation_rank') else 50)
     )
-
-    logger.info(f"Loading pretrained model from {args.model_path}")
-    checkpoint = torch.load(args.model_path, map_location=device)
     model = None
     try:
-        if args.model_type == 'single':
-            model = RNAtoHnEModel(**model_constructor_args, relation_rank=args.relation_rank)
-        else:
-            model = MultiCellRNAtoHnEModel(**model_constructor_args, relation_rank=args.relation_rank)
-        model.load_state_dict(checkpoint["model"])
+        if ckpt_model_type == 'single':
+            model = RNAtoHnEModel(**model_constructor_args)
+        else: # multi-cell
+            model_constructor_args['num_aggregation_heads'] = model_config_ckpt.get('num_aggregation_heads', args.num_aggregation_heads if hasattr(args, 'num_aggregation_heads') else 4)
+            model = MultiCellRNAtoHnEModel(**model_constructor_args)
+        model.load_state_dict(model_state)
     except Exception as e:
-        logger.error(f"Failed to load model with current constructor: {e}")
-        logger.warning(f"Attempting to load model with deprecated constructor.")
-        if args.model_type == 'single':
-            model = RNAtoHnEModel_deprecation(**model_constructor_args)
+        logger.warning(f"Failed to load model with current constructor: {e}. Trying deprecated constructor.")
+        deprecated_constructor_args = model_constructor_args.copy()
+        if 'relation_rank' in deprecated_constructor_args and ckpt_model_type == 'single': # Deprecated single didn't have relation_rank
+            deprecated_constructor_args.pop('relation_rank')
+        if 'num_aggregation_heads' in deprecated_constructor_args:
+            deprecated_constructor_args.pop('num_aggregation_heads')
+
+        if ckpt_model_type == 'single':
+            model = RNAtoHnEModel_deprecation(**deprecated_constructor_args)
         else:
-            model = MultiCellRNAtoHnEModel_deprecation(**model_constructor_args)
-        model.load_state_dict(checkpoint["model"])
+            model = MultiCellRNAtoHnEModel_deprecation(**deprecated_constructor_args)
+        model.load_state_dict(model_state)
         
-    logger.info(f"Model loaded successfully")
+    logger.info(f"Model loaded successfully using {ckpt_model_type} constructor.")
     model.to(device)
     model.eval()
+    # --- End Model Loading ---
     
     rectified_flow = RectifiedFlow(sigma_min=0.002, sigma_max=80.0)
     inception_model = InceptionModel(device)
     
-    all_ssim = []
-    all_psnr = []
+    all_ssim_scores = []
+    all_psnr_scores = []
     all_real_features_for_fid = [] 
     all_gen_features_for_fid = []   
     per_sample_metrics_list = []
-    all_batch_fids_list = [] # <-- ADDED: List to store valid per-batch FID scores
+    all_batch_fids_list = [] 
 
     logger.info(f"Starting evaluation on {len(eval_loader)} batches")
     
     with torch.no_grad():
         for batch_idx, batch in enumerate(tqdm(eval_loader, desc="Evaluating")):
             sample_ids_in_batch = []
-            real_images = batch['image'].to(device)
+            real_images_tensor = batch['image'].to(device) # B,C,H,W
+            current_batch_size = real_images_tensor.shape[0]
 
-            if args.model_type == 'single':
+            if ckpt_model_type == 'single':
                 gene_expr = batch['gene_expr'].to(device)
                 sample_ids_in_batch = batch['cell_id']
                 gene_mask = batch.get('gene_mask', None)
                 if gene_mask is not None: gene_mask = gene_mask.to(device)
                 
-                generated_images = generate_images_with_rectified_flow(
-                    model, rectified_flow, gene_expr, device, args.gen_steps, gene_mask, False
+                generated_images_tensor = generate_images_with_rectified_flow(
+                    model, rectified_flow, gene_expr, device, args.gen_steps, gene_mask=gene_mask, is_multi_cell=False
                 )
-            else: 
+            else: # multi-cell
                 processed_batch = prepare_multicell_batch(batch, device)
                 gene_expr = processed_batch['gene_expr']
-                num_cells = processed_batch.get('num_cells') # Use .get for safety
+                num_cells_info = processed_batch.get('num_cells') 
                 sample_ids_in_batch = batch['patch_id']
-                
-                generated_images = generate_images_with_rectified_flow(
-                    model, rectified_flow, gene_expr, device, args.gen_steps, num_cells=num_cells, is_multi_cell=True
+                gene_mask = batch.get('gene_mask', None) # Assuming gene_mask can also be part of multi-cell batch
+                if gene_mask is not None: gene_mask = gene_mask.to(device)
+
+                generated_images_tensor = generate_images_with_rectified_flow(
+                    model, rectified_flow, gene_expr, device, args.gen_steps, num_cells=num_cells_info, gene_mask=gene_mask, is_multi_cell=True
                 )
             
-            real_features_batch = inception_model(real_images)
-            gen_features_batch = inception_model(generated_images) # InceptionModel now handles channel adjustment
+            # <<< START STAIN NORMALIZATION MODIFICATION >>>
+            if args.enable_stain_normalization and args.img_channels >= 3:
+                logger.debug(f"Applying stain normalization for batch {batch_idx} using method: {args.stain_normalization_method}")
+                normalized_generated_images_list = []
+                for j in range(current_batch_size):
+                    real_img_np_j = real_images_tensor[j].cpu().numpy().transpose(1, 2, 0) # H,W,C
+                    gen_img_np_j = generated_images_tensor[j].cpu().numpy().transpose(1, 2, 0) # H,W,C
+
+                    real_rgb_j = real_img_np_j[:, :, :3]
+                    gen_rgb_original_j = gen_img_np_j[:, :, :3]
+
+                    if args.stain_normalization_method == 'skimage_hist_match':
+                        gen_rgb_normalized_j = normalize_staining_rgb_skimage_hist_match(
+                            gen_rgb_original_j, real_rgb_j
+                        )
+                    else:
+                        # logger.warning(f"Unsupported stain norm method: {args.stain_normalization_method}. Using original.")
+                        gen_rgb_normalized_j = gen_rgb_original_j
+                    
+                    if args.img_channels > 3:
+                        gen_aux_j = gen_img_np_j[:, :, 3:]
+                        final_gen_img_np_j = np.concatenate((gen_rgb_normalized_j, gen_aux_j), axis=2)
+                    else:
+                        final_gen_img_np_j = gen_rgb_normalized_j
+                    
+                    # Convert back to C,H,W tensor and add to list
+                    normalized_generated_images_list.append(
+                        torch.from_numpy(final_gen_img_np_j.transpose(2,0,1)).to(device)
+                    )
+                generated_images_tensor = torch.stack(normalized_generated_images_list) # B,C,H,W
+            # <<< END STAIN NORMALIZATION MODIFICATION >>>
+
+            # Ensure images are in [0,1] before passing to Inception or metrics
+            real_images_tensor = torch.clamp(real_images_tensor, 0, 1)
+            generated_images_tensor = torch.clamp(generated_images_tensor, 0, 1)
+
+            real_features_batch = inception_model(real_images_tensor)
+            gen_features_batch = inception_model(generated_images_tensor)
             
             all_real_features_for_fid.append(real_features_batch.cpu().numpy())
             all_gen_features_for_fid.append(gen_features_batch.cpu().numpy())
             
-            ssim_scores, psnr_scores = calculate_image_metrics(real_images, generated_images)
-            all_ssim.extend(ssim_scores)
-            all_psnr.extend(psnr_scores)
+            batch_ssim_scores, batch_psnr_scores = calculate_image_metrics(real_images_tensor, generated_images_tensor)
+            all_ssim_scores.extend(batch_ssim_scores)
+            all_psnr_scores.extend(batch_psnr_scores)
 
             per_sample_feat_dists = []
-            for i in range(real_features_batch.shape[0]):
-                r_feat = real_features_batch[i].cpu().numpy()
-                g_feat = gen_features_batch[i].cpu().numpy()
-                distance = np.linalg.norm(r_feat - g_feat)
-                per_sample_feat_dists.append(distance)
+            if real_features_batch.shape[0] > 0: # Ensure batch is not empty
+                for i in range(real_features_batch.shape[0]):
+                    r_feat = real_features_batch[i].cpu().numpy()
+                    g_feat = gen_features_batch[i].cpu().numpy()
+                    distance = np.linalg.norm(r_feat - g_feat)
+                    per_sample_feat_dists.append(distance)
 
-            # <-- ADDED: Per-Batch FID Calculation -->
-            fid_batch = np.nan
-            # .cpu().numpy() done above for all_real/gen_features_for_fid, reuse if possible or re-evaluate for clarity.
-            # For clarity, let's use the already CPU-Numpy converted versions for this batch.
-            real_features_batch_np = real_features_batch.cpu().numpy() 
-            gen_features_batch_np = gen_features_batch.cpu().numpy()
-
-            # calculate_fid now handles batch size check and try-except internally
-            fid_batch = calculate_fid(real_features_batch_np, gen_features_batch_np)
+            fid_batch = calculate_fid(real_features_batch.cpu().numpy(), gen_features_batch.cpu().numpy())
             
             if not np.isnan(fid_batch):
                 all_batch_fids_list.append(fid_batch)
-            else:
-                logger.debug(f"FID for batch {batch_idx} is NaN (batch size: {real_features_batch_np.shape[0]}).")
-            # <-- END ADDED SECTION -->
+            # else:
+                # logger.debug(f"FID for batch {batch_idx} is NaN (batch size: {current_batch_size}).")
 
-            for i in range(len(ssim_scores)):
+            for i in range(len(batch_ssim_scores)):
                 per_sample_metrics_list.append({
-                    'sample_id': sample_ids_in_batch[i],
-                    'ssim': ssim_scores[i],
-                    'psnr': psnr_scores[i],
-                    'inception_feature_distance': per_sample_feat_dists[i],
-                    'batch_fid': fid_batch # <-- ADDED: Store batch_fid per sample
+                    'sample_id': sample_ids_in_batch[i] if i < len(sample_ids_in_batch) else f"batch{batch_idx}_sample{i}",
+                    'ssim': batch_ssim_scores[i],
+                    'psnr': batch_psnr_scores[i],
+                    'inception_feature_distance': per_sample_feat_dists[i] if i < len(per_sample_feat_dists) else np.nan,
+                    'batch_fid': fid_batch 
                 })
     
-    # Global FID
     global_fid_score = np.nan 
     if len(all_real_features_for_fid) > 0 and len(all_gen_features_for_fid) > 0:
         all_real_features_np = np.concatenate(all_real_features_for_fid, axis=0)
         all_gen_features_np = np.concatenate(all_gen_features_for_fid, axis=0)
-        # calculate_fid handles internal checks for sample size now
         global_fid_score = calculate_fid(all_real_features_np, all_gen_features_np)
         if np.isnan(global_fid_score):
-            logger.warning(f"Global FID calculation resulted in NaN (total samples: {all_real_features_np.shape[0]}). Check feature quality or sample count.")
+            logger.warning(f"Global FID calculation resulted in NaN (total samples: {all_real_features_np.shape[0]}).")
     else:
         logger.warning("No features collected for global FID calculation.")
 
-    ssim_mean, ssim_std = (np.mean(all_ssim), np.std(all_ssim)) if all_ssim else (np.nan, np.nan)
-    psnr_mean, psnr_std = (np.mean(all_psnr), np.std(all_psnr)) if all_psnr else (np.nan, np.nan)
+    ssim_mean, ssim_std = (np.mean(all_ssim_scores), np.std(all_ssim_scores)) if all_ssim_scores else (np.nan, np.nan)
+    psnr_mean, psnr_std = (np.mean(all_psnr_scores), np.std(all_psnr_scores)) if all_psnr_scores else (np.nan, np.nan)
     
-    all_feat_dists = [item['inception_feature_distance'] for item in per_sample_metrics_list if 'inception_feature_distance' in item]
+    all_feat_dists = [item['inception_feature_distance'] for item in per_sample_metrics_list if not np.isnan(item.get('inception_feature_distance', np.nan))]
     feat_dist_mean, feat_dist_std = (np.mean(all_feat_dists), np.std(all_feat_dists)) if all_feat_dists else (np.nan, np.nan)
 
-    # <-- ADDED: Calculate mean/std for per-batch FID scores -->
     batch_fid_mean = np.mean(all_batch_fids_list) if all_batch_fids_list else np.nan
     batch_fid_std = np.std(all_batch_fids_list) if all_batch_fids_list else np.nan
-    # <-- END ADDED SECTION -->
 
     metrics_summary = {
-        'global_fid': float(global_fid_score) if not np.isnan(global_fid_score) else None, # Renamed for clarity
+        'global_fid': float(global_fid_score) if not np.isnan(global_fid_score) else None,
         'ssim_mean': float(ssim_mean) if not np.isnan(ssim_mean) else None,
         'ssim_std': float(ssim_std) if not np.isnan(ssim_std) else None,
         'psnr_mean': float(psnr_mean) if not np.isnan(psnr_mean) else None,
         'psnr_std': float(psnr_std) if not np.isnan(psnr_std) else None,
         'inception_feature_distance_mean': float(feat_dist_mean) if not np.isnan(feat_dist_mean) else None,
         'inception_feature_distance_std': float(feat_dist_std) if not np.isnan(feat_dist_std) else None,
-        'batch_fid_mean': float(batch_fid_mean) if not np.isnan(batch_fid_mean) else None, # <-- ADDED
-        'batch_fid_std': float(batch_fid_std) if not np.isnan(batch_fid_std) else None,     # <-- ADDED
-        'num_valid_batch_fids': len(all_batch_fids_list), # <-- ADDED
-        'num_samples': len(all_ssim) if all_ssim else 0
+        'batch_fid_mean': float(batch_fid_mean) if not np.isnan(batch_fid_mean) else None, 
+        'batch_fid_std': float(batch_fid_std) if not np.isnan(batch_fid_std) else None,    
+        'num_valid_batch_fids': len(all_batch_fids_list), 
+        'num_samples_evaluated': len(all_ssim_scores) if all_ssim_scores else 0,
+        'stain_normalization_enabled': args.enable_stain_normalization,
+        'stain_normalization_method': args.stain_normalization_method if args.enable_stain_normalization else 'none'
     }
     
-    # <<< START MODIFICATION: Construct output filenames with prefix >>>
     prefix = args.output_name_prefix if args.output_name_prefix else ""
-    if prefix and not prefix.endswith("_"): # Add underscore if prefix exists and doesn't have one
+    if prefix and not prefix.endswith("_"): 
         prefix += "_"
 
     summary_filename = f"{prefix}rectified_metrics_summary.json"
@@ -396,45 +454,63 @@ def main():
         per_sample_df = pd.DataFrame(per_sample_metrics_list)
         csv_output_path = os.path.join(args.output_dir, csv_filename)
         per_sample_df.to_csv(csv_output_path, index=False)
-        logger.info(f"Per-sample metrics (including batch_fid) saved to {csv_output_path}")
-    else:
-        logger.info("No per-sample metrics to save.")
+        logger.info(f"Per-sample metrics saved to {csv_output_path}")
 
-    plt.figure(figsize=(12, 5))
+    # Plotting
+    fig_height = 5
+    num_plots = 2 # For SSIM, PSNR
+    if all_feat_dists: num_plots +=1
+    if all_batch_fids_list: num_plots +=1
     
-    plt.subplot(1, 2, 1)
-    if all_ssim:
-        plt.hist(all_ssim, bins=20, alpha=0.7); plt.axvline(ssim_mean, color='r', ls='dashed', lw=2)
-        plt.title(f'SSIM (Mean: {ssim_mean:.4f})')
-    else: plt.title('SSIM Distribution (No data)')
-    plt.xlabel('SSIM'); plt.ylabel('Count')
+    plt.figure(figsize=(4 * num_plots, fig_height))
+    plot_idx = 1
+
+    if all_ssim_scores:
+        plt.subplot(1, num_plots, plot_idx)
+        plt.hist(all_ssim_scores, bins=20, alpha=0.7, color='skyblue', edgecolor='black')
+        plt.axvline(ssim_mean, color='r', ls='dashed', lw=2, label=f'Mean: {ssim_mean:.3f}')
+        plt.title('SSIM Distribution'); plt.xlabel('SSIM'); plt.ylabel('Count'); plt.legend()
+        plot_idx+=1
     
-    plt.subplot(1, 2, 2)
-    if all_psnr:
-        plt.hist(all_psnr, bins=20, alpha=0.7); plt.axvline(psnr_mean, color='r', ls='dashed', lw=2)
-        plt.title(f'PSNR (Mean: {psnr_mean:.4f})')
-    else: plt.title('PSNR Distribution (No data)')
-    plt.xlabel('PSNR (dB)'); plt.ylabel('Count')
+    if all_psnr_scores:
+        plt.subplot(1, num_plots, plot_idx)
+        plt.hist(all_psnr_scores, bins=20, alpha=0.7, color='lightcoral', edgecolor='black')
+        plt.axvline(psnr_mean, color='r', ls='dashed', lw=2, label=f'Mean: {psnr_mean:.2f}')
+        plt.title('PSNR Distribution'); plt.xlabel('PSNR (dB)'); plt.ylabel('Count'); plt.legend()
+        plot_idx+=1
+
+    if all_feat_dists:
+        plt.subplot(1, num_plots, plot_idx)
+        plt.hist(all_feat_dists, bins=20, alpha=0.7, color='lightgreen', edgecolor='black')
+        plt.axvline(feat_dist_mean, color='r', ls='dashed', lw=2, label=f'Mean: {feat_dist_mean:.2f}')
+        plt.title('Inception Feature Distance'); plt.xlabel('L2 Distance'); plt.ylabel('Count'); plt.legend()
+        plot_idx+=1
+
+    if all_batch_fids_list:
+        plt.subplot(1, num_plots, plot_idx)
+        plt.hist(all_batch_fids_list, bins=min(20, len(all_batch_fids_list)//2 if len(all_batch_fids_list)>4 else 5 ), alpha=0.7, color='gold', edgecolor='black')
+        plt.axvline(batch_fid_mean, color='r', ls='dashed', lw=2, label=f'Mean: {batch_fid_mean:.2f}')
+        plt.title('Per-Batch FID Distribution'); plt.xlabel('FID'); plt.ylabel('Count'); plt.legend()
+        plot_idx+=1
     
     plt.tight_layout()
     plot_output_path = os.path.join(args.output_dir, plot_filename)
     plt.savefig(plot_output_path)
+    plt.close()
     logger.info(f"Metric distributions plot saved to {plot_output_path}")
-    # <<< END MODIFICATION >>>
     
     logger.info(f"=== Evaluation Results (Aggregated) ===")
-    if metrics_summary['num_samples'] > 0 :
-        logger.info(f"Number of samples: {metrics_summary['num_samples']}")
+    if metrics_summary['num_samples_evaluated'] > 0 :
+        logger.info(f"Number of samples evaluated: {metrics_summary['num_samples_evaluated']}")
         logger.info(f"Global FID Score (Dataset Level): {metrics_summary['global_fid'] if metrics_summary['global_fid'] is not None else 'N/A'}")
-        logger.info(f"SSIM: {metrics_summary['ssim_mean']:.4f} ± {metrics_summary['ssim_std']:.4f}" if metrics_summary['ssim_mean'] is not None else "SSIM: N/A")
-        logger.info(f"PSNR: {metrics_summary['psnr_mean']:.4f} ± {metrics_summary['psnr_std']:.4f}" if metrics_summary['psnr_mean'] is not None else "PSNR: N/A")
-        logger.info(f"Per-Sample Inception Feature Distance: {metrics_summary['inception_feature_distance_mean']:.4f} ± {metrics_summary['inception_feature_distance_std']:.4f}" if metrics_summary['inception_feature_distance_mean'] is not None else "Inception Feature Distance: N/A")
-        # <-- ADDED: Log batch FID summary -->
+        logger.info(f"SSIM: {metrics_summary['ssim_mean']:.4f} +/- {metrics_summary['ssim_std']:.4f}" if metrics_summary['ssim_mean'] is not None else "SSIM: N/A")
+        logger.info(f"PSNR: {metrics_summary['psnr_mean']:.4f} +/- {metrics_summary['psnr_std']:.4f}" if metrics_summary['psnr_mean'] is not None else "PSNR: N/A")
+        logger.info(f"Per-Sample Inception Feature Distance: {metrics_summary['inception_feature_distance_mean']:.4f} +/- {metrics_summary['inception_feature_distance_std']:.4f}" if metrics_summary['inception_feature_distance_mean'] is not None else "Inception Feature Distance: N/A")
         if metrics_summary['num_valid_batch_fids'] > 0:
-            logger.info(f"Per-Batch FID (Mean over {metrics_summary['num_valid_batch_fids']} batches): {metrics_summary['batch_fid_mean']:.4f} ± {metrics_summary['batch_fid_std']:.4f}")
+            logger.info(f"Per-Batch FID (Mean over {metrics_summary['num_valid_batch_fids']} batches): {metrics_summary['batch_fid_mean']:.4f} +/- {metrics_summary['batch_fid_std']:.4f}")
         else:
             logger.info("Per-Batch FID: N/A (no valid batches or all resulted in NaN)")
-        # <-- END ADDED SECTION -->
+        logger.info(f"Stain Normalization: {'Enabled (' + args.stain_normalization_method + ')' if args.enable_stain_normalization else 'Disabled'}")
     else:
         logger.info("No samples were evaluated.")
     logger.info(f"Results saved to {args.output_dir}")

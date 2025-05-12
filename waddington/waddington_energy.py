@@ -129,7 +129,7 @@ class WaddingtonEnergy(nn.Module):
             try:
                 # Handle channel dimension mismatches
                 if images.shape[1] != self.img_channels:
-                    logger.info(f"Adapting image channels from {images.shape[1]} to {self.img_channels}")
+                    # logger.info(f"Adapting image channels from {images.shape[1]} to {self.img_channels}")
                     
                     if images.shape[1] > self.img_channels:
                         # Use first n channels

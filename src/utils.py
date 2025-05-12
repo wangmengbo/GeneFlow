@@ -19,6 +19,8 @@ logger = logging.getLogger(__name__)
 def setup_parser(parser=None):
     if parser is None:
         parser = argparse.ArgumentParser(description="A tool for generating and managing prompts.")
+
+    # general arguments for data loading
     parser.add_argument("--adata", type=str, default="cell_256_aux/input/adata_unfiltered.h5ad", help="Path to the AnnData object.")
     parser.add_argument("--layer", type=str, default=None, help="Layer to use for the AnnData object.")
     parser.add_argument("--cell_type", type=str, nargs='*', default=None)
@@ -40,7 +42,16 @@ def setup_parser(parser=None):
                         help='Rank K for low-rank factorization in gene relation network (default: 50).')
     parser.add_argument('--num_aggregation_heads', type=int, default=4, 
                         help='Number of heads for cell aggregation in MultiCellRNAEncoder (multi-cell only, default: 4).')
+    
+    # other general arguments
+    parser.add_argument('--output_name_prefix', type=str, default='', help='Prefix for the output evaluation files.')
     parser.add_argument('--nsamples_test', type=int, default=-1, help='Number of batches to use for testing.')
+    
+    parser.add_argument('--enable_stain_normalization', action='store_true',
+                        help='Enable stain normalization of generated images to real images before evaluation/generation.')
+    parser.add_argument('--stain_normalization_method', type=str, default='skimage_hist_match',
+                        choices=['skimage_hist_match', 'none'], # 'macenko', 'vahadane', 'reinhard' can be added if supported
+                        help='Stain normalization method. "skimage_hist_match" uses scikit-image. "none" for no normalization.')
     return parser
 
 def parse_adata(args=None, 

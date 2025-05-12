@@ -12,11 +12,14 @@ from torch.utils.data import Dataset, DataLoader
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.single_model import RNAtoHnEModel
-from baseline.diffusion import GaussianDiffusion
 from src.utils import setup_parser, parse_adata
 from src.multi_model import MultiCellRNAtoHnEModel, prepare_multicell_batch
 from src.dataset import CellImageGeneDataset, PatchImageGeneDataset, patch_collate_fn
-from baseline.diffusion_train import generate_images_with_diffusion
+from waddington.waddington_energy import WaddingtonEnergy
+from waddington.waddington_rectified_flow import WaddingtonRectifiedFlow
+from waddington.waddington_train import generate_images_with_waddington
+from src.single_model_deprecation import RNAtoHnEModel as RNAtoHnEModel_deprecation
+from src.multi_model_deprecation import MultiCellRNAtoHnEModel as MultiCellRNAtoHnEModel_deprecation
 
 # Configure logging
 logging.basicConfig(
@@ -26,29 +29,22 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate images using pretrained RNA to H&E model with Diffusion.")
-    parser.add_argument('--model_path', type=str, required=True, help='Path to the pretrained model.')
-    parser.add_argument('--gene_expr', type=str, default="cell_256_aux/normalized.csv", help='Path to gene expression CSV file.')
+    parser = argparse.ArgumentParser(description="Generate images using pretrained RNA to H&E model with Waddington landscape guidance.")
+    parser.add_argument('--model_path', type=str, default="cell_256_aux/output_waddington/best_single_waddington_model.pt", help='Path to the pretrained model.')
+    parser.add_argument('--gene_expr', type=str, default="cell_256_aux/input/normalized.csv", help='Path to gene expression CSV file.')
     parser.add_argument('--image_paths', type=str, default="cell_256_aux/input/cell_image_paths.json", help='Path to JSON file with image paths.')
     parser.add_argument('--patch_image_paths', type=str, default="cell_256_aux/input/patch_image_paths.json", help='Path to JSON file with patch paths.')
     parser.add_argument('--patch_cell_mapping', type=str, default="cell_256_aux/input/patch_cell_mapping.json", help='Path to JSON file with mapping paths.')
-    parser.add_argument('--output_dir', type=str, default='cell_256_aux/output_diffusion', help='Directory to save outputs.')
-    parser.add_argument('--epochs', type=int, default=10, help='Number of training epochs.')
-    parser.add_argument('--batch_size', type=int, default=20, help='Batch size for training and evaluation.')
-    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate for optimizer.')
-    parser.add_argument('--weight_decay', type=float, default=0.01, help='Weight decay for optimizer.')
+    parser.add_argument('--output_dir', type=str, default='cell_256_aux/output_waddington', help='Directory to save outputs.')
+    parser.add_argument('--batch_size', type=int, default=6, help='Batch size for training and evaluation.')
     parser.add_argument('--img_size', type=int, default=256, help='Size of the generated images.')
-    parser.add_argument('--img_channels', type=int, default=4, help='Number of image channels (3 for RGB, 1 Greyscale).')
-    parser.add_argument('--use_amp', action='store_true', help='Use automatic mixed precision for training.')
-    parser.add_argument('--patience', type=int, default=5, help='Early stopping patience.')
-    parser.add_argument('--gen_steps', type=int, default=300, help='Number of steps for solver during generation.')
+    parser.add_argument('--img_channels', type=int, default=4, help='Number of image channels (3 for RGB, 1 for auxiliary).')
+    parser.add_argument('--gen_steps', type=int, default=100, help='Number of steps for solver during generation.')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility.')
-    parser.add_argument('--model_type', type=str, choices=['single', 'multi'], default='single',help='Type of model to use: single-cell or multi-cell')
+    parser.add_argument('--model_type', type=str, choices=['single', 'multi'], default='single', help='Type of model to use: single-cell or multi-cell')
     parser.add_argument('--normalize_aux', action='store_true', help='Normalize auxiliary channels.')
-    parser.add_argument('--diffusion_timesteps', type=int, default=300, help='Number of timesteps for diffusion process')
-    parser.add_argument('--beta_schedule', type=str, choices=['linear', 'cosine'], default='cosine', help='Noise schedule for diffusion')
-    parser.add_argument('--predict_noise', action='store_true', default=True, help='Whether model predicts noise (True) or x_0 (False)')
-    parser.add_argument('--sampling_method', type=str, choices=['ddpm', 'ddim'], default='ddpm', help='Sampling method for diffusion generation')
+    parser.add_argument('--num_samples', type=int, default=10, help='Number of samples to generate.')
+    parser.add_argument('--guidance_strength', type=float, default=1.0, help='Strength of Waddington energy guidance during generation.')
     parser = setup_parser(parser)
     args = parser.parse_args()
 
@@ -146,96 +142,120 @@ def main():
     
     logger.info(f"Dataset created with {len(dataset)} samples")
     
-    # Split into train and validation sets
+	# Split into train and validation sets
     train_size = int(0.8 * len(dataset))
     val_size = len(dataset) - train_size
-    _, vis_dataset = torch.utils.data.random_split(
+    _, dataset = torch.utils.data.random_split(
         dataset, [train_size, val_size]
     )
-    
+
     # Create a subset of the dataset for generating images
     num_vis_samples = min(args.num_samples, len(dataset))
-    if num_vis_samples == 0 and len(dataset) > 0: # Ensure we have at least one sample if dataset is not empty
-        num_vis_samples = 1
-    elif len(dataset) == 0:
-        logger.error("Dataset is empty after splitting. Exiting.")
-        return
-    
-    vis_indices = torch.randperm(len(dataset))[:num_vis_samples].tolist() # Ensure it's a list
+    vis_indices = torch.randperm(len(dataset))[:num_vis_samples]
     vis_dataset = torch.utils.data.Subset(dataset, vis_indices)
 
     # Use the appropriate collate function based on model type
     if args.model_type == 'multi':
         vis_loader = DataLoader(
             vis_dataset, 
-            batch_size=args.batch_size, 
+            batch_size=num_vis_samples, 
             shuffle=False,
             collate_fn=patch_collate_fn
         )
     else:
         vis_loader = DataLoader(
             vis_dataset, 
-            batch_size=args.batch_size, 
+            batch_size=num_vis_samples, 
             shuffle=False
         )
     
     # Initialize appropriate model based on model type
     gene_dim = expr_df.shape[1]  # Number of genes
     
-    if args.model_type == 'single':
-        logger.info("Initializing single-cell model")
-        model = RNAtoHnEModel(
-            rna_dim=gene_dim,
-            img_channels=args.img_channels,
-            img_size=args.img_size,
-            model_channels=128,
-            num_res_blocks=2,
-            attention_resolutions=[16],
-            dropout=0.1,
-            channel_mult=(1, 2, 2, 2),
-            use_checkpoint=False,
-            num_heads=2,
-            num_head_channels=16,
-            use_scale_shift_norm=True,
-            resblock_updown=True,
-            use_new_attention_order=True,
-            concat_mask=args.concat_mask if hasattr(args, 'concat_mask') else False,
-        )
-    else:  # multi-cell model
-        logger.info("Initializing multi-cell model")
-        model = MultiCellRNAtoHnEModel(
-            rna_dim=gene_dim,
-            img_channels=args.img_channels,
-            img_size=args.img_size,
-            model_channels=128,
-            num_res_blocks=2,
-            attention_resolutions=[16],
-            dropout=0.1,
-            channel_mult=(1, 2, 2, 2),
-            use_checkpoint=False,
-            num_heads=2,
-            num_head_channels=16,
-            use_scale_shift_norm=True,
-            resblock_updown=True,
-            use_new_attention_order=True,
-            concat_mask=args.concat_mask if hasattr(args, 'concat_mask') else False,
-        )
-    
+    model_constructor_args = dict(
+        rna_dim= gene_dim,
+        img_channels= args.img_channels,
+        img_size= args.img_size,
+        model_channels= 128,
+        num_res_blocks= 2,
+        attention_resolutions= (16,),
+        dropout= 0.1,        
+        channel_mult= (1, 2, 2, 2),
+        use_checkpoint= False,
+        num_heads= 2,    
+        num_head_channels= 16, 
+        use_scale_shift_norm=True,
+        resblock_updown=True,
+        use_new_attention_order=True,
+        concat_mask= args.concat_mask,
+    )
+
     # Load the pretrained model
     logger.info(f"Loading pretrained model from {args.model_path}")
-    checkpoint = torch.load(args.model_path, weights_only=True)
-    model.load_state_dict(checkpoint["model"])
+    checkpoint = torch.load(args.model_path, map_location=device)
+    
+    # Try loading with the standard model first
+    model = None
+    try:
+        if args.model_type == 'single':
+            logger.info("Initializing single-cell model")
+            model = RNAtoHnEModel(**model_constructor_args)
+        else:  # multi-cell model
+            logger.info("Initializing multi-cell model")
+            model = MultiCellRNAtoHnEModel(**model_constructor_args, relation_rank=args.relation_rank)
+        model.load_state_dict(checkpoint["model"])
+    except Exception as e:
+        logger.error(f"Error loading model state dict: {e}")
+        
+    # If standard model loading failed, try with the deprecated model
+    if model is None:
+        if args.model_type == 'single':
+            logger.info("Initializing single-cell model (deprecated)")
+            model = RNAtoHnEModel_deprecation(**model_constructor_args)
+        else:  # multi-cell model
+            logger.info("Initializing multi-cell model (deprecated)")
+            model = MultiCellRNAtoHnEModel_deprecation(**model_constructor_args, relation_rank=args.relation_rank)
+        model.load_state_dict(checkpoint["model"])
+    
+    logger.info(f"Model loaded successfully")
+    
+    # Load the model to device
     model.to(device)
     model.eval()  # Set to evaluation mode
     
-    # Initialize the diffusion model
-    diffusion = GaussianDiffusion(
-        timesteps=args.diffusion_timesteps,
-        beta_schedule=args.beta_schedule,
-        predict_noise=args.predict_noise,
-        device=device
+    # Initialize the Waddington energy model
+    logger.info("Initializing Waddington energy model")
+    
+    energy_params = {
+        'gene_dim': gene_dim,
+        'hidden_dim': checkpoint.get('energy_hidden_dim', 128),
+        'energy_scale': checkpoint.get('energy_scale', 1.0),
+        'num_attractor_states': checkpoint.get('num_attractor_states', 5),
+        'img_size': args.img_size,
+        'img_channels': args.img_channels
+    }
+    
+    waddington_energy = WaddingtonEnergy(**energy_params)
+    
+    # Load the energy model weights
+    if "waddington_energy" in checkpoint:
+        waddington_energy.load_state_dict(checkpoint["waddington_energy"])
+        logger.info("Waddington energy model loaded from checkpoint")
+    else:
+        logger.warning("No Waddington energy model found in checkpoint")
+    
+    waddington_energy.to(device)
+    waddington_energy.eval()
+    
+    # Initialize the Waddington-guided rectified flow
+    waddington_flow = WaddingtonRectifiedFlow(
+        sigma_min=0.002, 
+        sigma_max=80.0, 
+        energy_weight=checkpoint.get('energy_weight', 0.1)
     )
-    logger.info(f"Initialized diffusion model with {args.diffusion_timesteps} timesteps and {args.beta_schedule} schedule")
+    
+    # Set the energy model in the flow
+    waddington_flow.waddington_energy = waddington_energy
     
     # Get a batch of data
     batch = next(iter(vis_loader))
@@ -249,18 +269,18 @@ def main():
         if gene_mask is not None:
             gene_mask = gene_mask.to(device)
         
-        # Generate images with diffusion
-        logger.info(f"Generating images for {len(gene_expr)} samples using diffusion ({args.sampling_method})...")
+        # Generate images with Waddington guided flow
+        logger.info(f"Generating images for {len(gene_expr)} samples using Waddington guidance...")
         with torch.no_grad():
-            generated_images = generate_images_with_diffusion(
+            generated_images = generate_images_with_waddington(
                 model=model,
-                diffusion=diffusion,
+                waddington_flow=waddington_flow,
                 gene_expr=gene_expr,
                 device=device,
                 num_steps=args.gen_steps,
                 gene_mask=gene_mask,
                 is_multi_cell=False,
-                method=args.sampling_method
+                guidance_strength=args.guidance_strength
             )
         logger.info("Image generation complete")
     else:  # multi-cell model
@@ -271,20 +291,24 @@ def main():
         real_images = batch['image']
         patch_ids = batch['patch_id']
         
-        # Generate images with diffusion
-        logger.info(f"Generating images for {len(real_images)} patches using diffusion ({args.sampling_method})...")
+        # Generate images with Waddington guided flow
+        logger.info(f"Generating images for {len(real_images)} patches using Waddington guidance...")
         with torch.no_grad():
-            generated_images = generate_images_with_diffusion(
+            generated_images = generate_images_with_waddington(
                 model=model,
-                diffusion=diffusion,
+                waddington_flow=waddington_flow,
                 gene_expr=gene_expr,
                 device=device,
                 num_steps=args.gen_steps,
                 num_cells=num_cells,
                 is_multi_cell=True,
-                method=args.sampling_method
+                guidance_strength=args.guidance_strength
             )
         logger.info("Image generation complete")
+
+    # Calculate energies for visualization
+    with torch.no_grad():
+        energies = waddington_energy(gene_expr).cpu().numpy()
 
     # Calculate number of extra channels beyond RGB
     num_channels = args.img_channels
@@ -315,9 +339,10 @@ def main():
         gen_img = generated_images[i].cpu().numpy().transpose(1, 2, 0)
         
         # Display RGB composites for both real and generated images (first 3 channels)
-        # Real RGB composite
+        # Real RGB composite with energy value
         axes[0, i].imshow(real_img[:,:,:3])
-        axes[0, i].set_title(f"Real RGB: {display_ids[i]}")
+        energy_text = f"{display_ids[i]}\nEnergy: {energies[i]:.2f}" if i < len(energies) else display_ids[i]
+        axes[0, i].set_title(f"Real RGB: {energy_text}")
         axes[0, i].axis('off')
         
         # Generated RGB composite
@@ -364,7 +389,17 @@ def main():
             )
 
     plt.tight_layout()
-    plt.savefig(os.path.join(args.output_dir, "generation_results.png"))
+    plt.savefig(os.path.join(args.output_dir, "waddington_generation_results.png"))
+    
+    # Visualize energy distribution
+    plt.figure(figsize=(8, 6))
+    plt.hist(energies, bins=20, alpha=0.7)
+    plt.axvline(np.mean(energies), color='r', linestyle='dashed', linewidth=2)
+    plt.title('Distribution of Waddington Energy Values')
+    plt.xlabel('Energy')
+    plt.ylabel('Count')
+    plt.grid(alpha=0.3)
+    plt.savefig(os.path.join(args.output_dir, "energy_distribution.png"))
     
     logger.info(f"Results saved to {args.output_dir}")
 
