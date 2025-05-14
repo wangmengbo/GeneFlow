@@ -166,7 +166,6 @@ def main():
     vis_indices = torch.randperm(len(dataset))[:num_vis_samples].tolist() # Ensure it's a list
     vis_dataset = torch.utils.data.Subset(dataset, vis_indices)
 
-
     # Use the appropriate collate function based on model type
     if args.model_type == 'multi':
         vis_loader = DataLoader(

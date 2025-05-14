@@ -1,7 +1,11 @@
+import os
+import sys
 import torch
 import torch.nn as nn
 import logging
 import math
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from rectified.rectified_flow import RectifiedFlow
 
 # Configure logging

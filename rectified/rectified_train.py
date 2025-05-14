@@ -5,7 +5,7 @@ import logging
 from tqdm import tqdm
 from torchmetrics.aggregation import MeanMetric
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from rectified.rectified_flow import DOPRI5Solver
+from .rectified_flow import DOPRI5Solver
 
 # Configure logging
 logging.basicConfig(

@@ -142,13 +142,6 @@ def main():
     
     logger.info(f"Dataset created with {len(dataset)} samples")
     
-	# Split into train and validation sets
-    train_size = int(0.8 * len(dataset))
-    val_size = len(dataset) - train_size
-    _, dataset = torch.utils.data.random_split(
-        dataset, [train_size, val_size]
-    )
-
     # Create a subset of the dataset for generating images
     num_vis_samples = min(args.num_samples, len(dataset))
     vis_indices = torch.randperm(len(dataset))[:num_vis_samples]
@@ -226,18 +219,31 @@ def main():
     # Initialize the Waddington energy model
     logger.info("Initializing Waddington energy model")
     
+    # First check the channel count in the checkpoint's energy model
+    checkpoint_channels = None
+    for key in checkpoint["waddington_energy"]:
+        if "image_net.1.weight" in key:
+            checkpoint_channels = checkpoint["waddington_energy"][key].shape[1]
+            break
+
+    if checkpoint_channels is None:
+        checkpoint_channels = args.img_channels
+
+    logger.info(f"Detected {checkpoint_channels} channels in Waddington energy checkpoint (current setting: {args.img_channels})")
+
+    # Create energy model with the correct channel count from checkpoint
     energy_params = {
         'gene_dim': gene_dim,
         'hidden_dim': checkpoint.get('energy_hidden_dim', 128),
         'energy_scale': checkpoint.get('energy_scale', 1.0),
         'num_attractor_states': checkpoint.get('num_attractor_states', 5),
         'img_size': args.img_size,
-        'img_channels': args.img_channels
+        'img_channels': checkpoint_channels  # Use channels from checkpoint instead of args
     }
-    
+
     waddington_energy = WaddingtonEnergy(**energy_params)
-    
-    # Load the energy model weights
+
+    # Now we can load the state dict without channel mismatch errors
     if "waddington_energy" in checkpoint:
         waddington_energy.load_state_dict(checkpoint["waddington_energy"])
         logger.info("Waddington energy model loaded from checkpoint")

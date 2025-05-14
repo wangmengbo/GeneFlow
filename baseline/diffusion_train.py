@@ -3,9 +3,9 @@ import sys
 import torch
 import logging
 from tqdm import tqdm
-from diffusion import DiffusionSampler
 from torchmetrics.aggregation import MeanMetric
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from .diffusion import DiffusionSampler
 
 # Configure logging
 logging.basicConfig(

@@ -1,4 +1,5 @@
 import os
+import sys
 import torch
 import logging
 from tqdm import tqdm
@@ -9,7 +10,7 @@ from torchmetrics.aggregation import MeanMetric
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 
-# Import from your existing files
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from rectified.rectified_train import NativeScalerWithGradNormCount, DOPRI5Solver, generate_images_with_rectified_flow
 from waddington.waddington_energy import WaddingtonEnergy
 from waddington.waddington_rectified_flow import WaddingtonRectifiedFlow

@@ -128,7 +128,6 @@ def main():
     parser.add_argument('--patch_image_paths', type=str, default="cell_256_aux/input/patch_image_paths.json", help='Path to JSON file with patch paths.')
     parser.add_argument('--patch_cell_mapping', type=str, default="cell_256_aux/input/patch_cell_mapping.json", help='Path to JSON file with mapping paths.')
     parser.add_argument('--output_dir', type=str, default='cell_256_aux/output_waddington', help='Directory to save outputs.')
-    parser.add_argument('--output_name_prefix', type=str, default='', help='Prefix for the output evaluation files.')
     parser.add_argument('--batch_size', type=int, default=20, help='Batch size for evaluation.')
     parser.add_argument('--img_size', type=int, default=256, help='Size of the generated images.')
     parser.add_argument('--img_channels', type=int, default=4, help='Number of image channels (3 for RGB, 1 auxiliary).')
@@ -242,18 +241,31 @@ def main():
     model.to(device)
     model.eval()
     
-    # Load or initialize the Waddington energy model
+    # Check for image channel mismatch in the checkpoint
+    checkpoint_channels = None
+    for key in checkpoint["waddington_energy"]:
+        if "image_net.1.weight" in key:
+            checkpoint_channels = checkpoint["waddington_energy"][key].shape[1]
+            break
+
+    if checkpoint_channels is None:
+        checkpoint_channels = args.img_channels
+
+    logger.info(f"Detected {checkpoint_channels} channels in Waddington energy checkpoint (current setting: {args.img_channels})")
+
+    # Load or initialize the Waddington energy model with the correct channel count
     energy_params = {
         'gene_dim': gene_dim,
         'hidden_dim': checkpoint.get('energy_hidden_dim', 128),
         'energy_scale': checkpoint.get('energy_scale', 1.0),
         'num_attractor_states': checkpoint.get('num_attractor_states', 5),
         'img_size': args.img_size,
-        'img_channels': args.img_channels
+        'img_channels': checkpoint_channels  # Use channels from checkpoint
     }
-    
+
     waddington_energy = WaddingtonEnergy(**energy_params)
-    
+
+    # Now we can load the state dict without channel mismatch errors
     if "waddington_energy" in checkpoint:
         waddington_energy.load_state_dict(checkpoint["waddington_energy"])
         logger.info("Waddington energy model loaded from checkpoint")

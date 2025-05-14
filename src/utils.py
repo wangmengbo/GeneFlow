@@ -42,6 +42,8 @@ def setup_parser(parser=None):
                         help='Rank K for low-rank factorization in gene relation network (default: 50).')
     parser.add_argument('--num_aggregation_heads', type=int, default=4, 
                         help='Number of heads for cell aggregation in MultiCellRNAEncoder (multi-cell only, default: 4).')
+    parser.add_argument('--cell_id_to_generate', type=str, default=None, nargs='*',
+                        help='Cell IDs to generate images for. If not provided, all cells will be used.')
     
     # other general arguments
     parser.add_argument('--output_name_prefix', type=str, default='', help='Prefix for the output evaluation files.')
