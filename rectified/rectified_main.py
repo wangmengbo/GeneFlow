@@ -15,7 +15,7 @@ from src.single_model import RNAtoHnEModel
 from rectified.rectified_flow import RectifiedFlow
 from src.utils import setup_parser, parse_adata, analyze_gene_importance
 from src.multi_model import MultiCellRNAtoHnEModel, prepare_multicell_batch
-from src.dataset import CellImageGeneDataset, PatchImageGeneDataset, patch_collate_fn
+from src.dataset import CellImageGeneDataset, PatchImageGeneDataset, patch_collate_fn, load_hest1k_singlecell_data
 from rectified.rectified_train import train_with_rectified_flow, generate_images_with_rectified_flow
 
 # Configure logging
@@ -48,7 +48,8 @@ def main():
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility.')
     parser.add_argument('--model_type', type=str, choices=['single', 'multi'], default='multi', help='Type of model to use: single-cell or multi-cell')
     parser.add_argument('--normalize_aux', action='store_true', help='Normalize auxiliary channels.')
-    
+    parser.add_argument('--hest1k_sid', type=str, default=None, help='HEST-1k sample ID for direct loading')
+    parser.add_argument('--hest1k_base_dir', type=str, default=None, help='Base directory for HEST-1k data')
     parser = setup_parser(parser)
     args = parser.parse_args()
 
@@ -63,44 +64,46 @@ def main():
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     
-    # Load gene expression data
-    if args.adata is not None:
+    if args.hest1k_sid and args.hest1k_base_dir:
+        logger.info(f"Loading pre-processed HEST-1k data for sample {args.hest1k_sid}")
+        expr_df, image_paths = load_hest1k_singlecell_data(
+            args.hest1k_sid, args.hest1k_base_dir, img_size=args.img_size, img_channels=args.img_channels
+        )
+        missing_gene_symbols = None
+    elif args.adata is not None:
         logger.info(f"Loading AnnData from {args.adata}")
         expr_df, missing_gene_symbols = parse_adata(args)
     else:
         logger.warning(f"(deprecated) Loading gene expression data from {args.gene_expr}")
         expr_df = pd.read_csv(args.gene_expr, index_col=0)
+        missing_gene_symbols = None
     logger.info(f"Loaded gene expression data with shape: {expr_df.shape}")
     gene_names = expr_df.columns.tolist()
 
     # Create appropriate dataset based on model type
     if args.model_type == 'single':
         logger.info("Creating single-cell dataset")
-
-        # Load image paths
-        logger.info(f"Loading image paths from {args.image_paths}")
-        with open(args.image_paths, "r") as f:
-            image_paths = json.load(f)
-        logger.info(f"Loaded {len(image_paths)} cell image paths")
-
-        image_paths_tmp = {}
-        for k,v in image_paths.items():
-            if os.path.exists(v):
-                image_paths_tmp[k] = v
-        
-        image_paths = image_paths_tmp
-        print(len(image_paths))
-        
+        if not (args.hest1k_sid and args.hest1k_base_dir):
+            logger.info(f"Loading image paths from {args.image_paths}")
+            with open(args.image_paths, "r") as f:
+                image_paths = json.load(f)
+            logger.info(f"Loaded {len(image_paths)} cell image paths")
+            image_paths_tmp = {}
+            for k, v in image_paths.items():
+                if os.path.exists(v):
+                    image_paths_tmp[k] = v
+            image_paths = image_paths_tmp
+            logger.info(f"Filtered to {len(image_paths)} existing image paths")
         dataset = CellImageGeneDataset(
-            expr_df, 
-            image_paths, 
+            expr_df,
+            image_paths,
             img_size=args.img_size,
             img_channels=args.img_channels,
             transform=transforms.Compose([
                 transforms.ToTensor(),
                 transforms.Resize((args.img_size, args.img_size), antialias=True),
             ]),
-            missing_gene_symbols=missing_gene_symbols if 'missing_gene_symbols' in locals() else None,
+            missing_gene_symbols=missing_gene_symbols,
             normalize_aux=args.normalize_aux,
         )
     else:  # multi-cell model

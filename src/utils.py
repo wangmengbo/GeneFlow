@@ -419,3 +419,17 @@ def analyze_gene_importance_diffusion(
     logger.info(f"Gene importance analysis complete. Results saved to {output_path}")
     
     return gene_importance_df
+
+
+def normalize_rgb(rgb_image):
+    rgb_image = rgb_image.astype(np.float32)
+    rgb_image = ((rgb_image - np.min(rgb_image) + 1e-6) / (np.max(rgb_image) - np.min(rgb_image) + 1e-6))
+    rgb_image = (rgb_image * 255).astype(np.uint8)
+    return rgb_image
+
+
+def normalize_aux(aux_image):
+    aux_image = aux_image.astype(np.float32)
+    aux_image = ((aux_image - np.min(aux_image) + 1e-6) / (np.max(aux_image) - np.min(aux_image) + 1e-6))
+    aux_image = (aux_image * 255).astype(np.uint8)
+    return aux_image
