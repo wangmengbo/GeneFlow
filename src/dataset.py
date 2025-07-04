@@ -5,6 +5,7 @@ import tifffile
 import os
 import h5py
 import numpy as np
+import pandas as pd
 import scanpy as sc
 from PIL import Image as PILImage
 from torchvision import transforms
@@ -22,19 +23,48 @@ logger = logging.getLogger(__name__)
 # Dataset Implementation
 # ======================================
 
-def load_hest1k_singlecell_data(sid, base_dir, img_size=224, img_channels=3):
-    # Load gene expression
-    p_st = os.path.join(base_dir, "st", f"{sid}.h5ad")
-    st = sc.read_h5ad(p_st)
-    expr_df = st.to_df()
+def load_hest1k_singlecell_data(sids, base_dir, img_size=224, img_channels=3):
+    # Check if sid is a iterable (e.g., list of sample IDs)
+    if not isinstance(sids, list):
+        sids = [sids]
+    
+    expr_df = []
+    image_paths = {}
+    for sid in sids:
+        # Load gene expression
+        p_st = os.path.join(base_dir, "st", f"{sid}.h5ad")
+        st = sc.read_h5ad(p_st)
+        expr_df_tmp = st.to_df()
+        expr_df_tmp.index = [ f"{sid}.{cell_id}" for cell_id in expr_df_tmp.index ]
 
-    # Load patch images and barcodes
-    p_patches = os.path.join(base_dir, "patches", f"{sid}.h5")
-    with h5py.File(p_patches, 'r') as f:
-        barcode = np.array(f['barcode']).astype(str).flatten()
-        img = np.array(f['img'])  # shape: [N, H, W, C]
-    # Build image_paths dict: cell_id -> patch image (numpy array)
-    image_paths = {cell_id: img[i] for i, cell_id in enumerate(barcode)}
+        # Ensure gene expressiong data has no nans
+        if expr_df_tmp.isnull().values.any():
+            logger.warning(f"Gene expression data for {sid} contains NaNs. Filling with zeros.")
+            expr_df_tmp.fillna(0, inplace=True)
+        # print(expr_df.head())
+        expr_df.append(expr_df_tmp)
+
+        # Load patch images and barcodes
+        p_patches = os.path.join(base_dir, "patches", f"{sid}.h5")
+        with h5py.File(p_patches, 'r') as f:
+            barcode = np.array(f['barcode']).astype(str).flatten()
+            barcode = np.char.add(f"{sid}.", barcode)
+            img = np.array(f['img'])  # shape: [N, H, W, C]
+        # Build image_paths dict: cell_id -> patch image (numpy array)
+        image_paths.update({cell_id: img[i] for i, cell_id in enumerate(barcode)})
+
+        # Check if expr_df_tmp has any nan or inf value with pandas method
+        print(f"Sample {sid}: expr_df_tmp nan:{expr_df_tmp.isnull().values.any()}, inf:{np.isinf(expr_df_tmp.values).any().any()}")
+        print(f"img, nan:{np.isnan(img).any()}, inf:{np.isinf(img).any()}")
+
+    # Check shapes of all expression data frames
+    logger.info(f"Loaded {len(expr_df)} samples with shape {[expr_df_tmp.shape for expr_df_tmp in expr_df]}")
+
+    expr_df = pd.concat(expr_df, axis=0, join='outer', sort=False)
+    print(f"expr_df.head():\n{expr_df.head()}")
+    expr_df.fillna(0, inplace=True)  # Fill NaNs with zeros for consistency
+    expr_df = expr_df.astype(np.float32)  # Ensure all data is float32 for consistency
+    logger.info(f"Combined expression data shape: {expr_df.shape}")
     return expr_df, image_paths
 
 
@@ -51,6 +81,8 @@ class CellImageGeneDataset(Dataset):
         self.image_paths = image_paths
 
         # Filter to only include cells that have both expression data and images
+        # print(self.expr_df.head())
+        # print(list(self.image_paths.keys())[:10])
         common_cells = set(self.expr_df.index) & set(self.image_paths.keys())
         self.cell_ids = list(common_cells)
         logger.info(f"Dataset contains {len(self.cell_ids)} cells with both expression data and images")

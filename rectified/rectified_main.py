@@ -48,7 +48,7 @@ def main():
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility.')
     parser.add_argument('--model_type', type=str, choices=['single', 'multi'], default='multi', help='Type of model to use: single-cell or multi-cell')
     parser.add_argument('--normalize_aux', action='store_true', help='Normalize auxiliary channels.')
-    parser.add_argument('--hest1k_sid', type=str, default=None, help='HEST-1k sample ID for direct loading')
+    parser.add_argument('--hest1k_sid', type=str, nargs='*', default=None, help='HEST-1k sample ID for direct loading')
     parser.add_argument('--hest1k_base_dir', type=str, default=None, help='Base directory for HEST-1k data')
     parser = setup_parser(parser)
     args = parser.parse_args()
@@ -64,7 +64,11 @@ def main():
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     
-    if args.hest1k_sid and args.hest1k_base_dir:
+    if args.hest1k_base_dir:
+        if args.hest1k_sid is None or len(args.hest1k_sid) == 0:
+            hest_metadata = pd.read_csv("/depot/natallah/data/Mengbo/HnE_RNA/data/HEST-1k/data/HEST_v1_1_0.csv")
+            args.hest1k_sid = hest_metadata[(hest_metadata['st_technology']=='Xenium') & \
+                (hest_metadata['species']=='Homo sapiens')]['id'].tolist()
         logger.info(f"Loading pre-processed HEST-1k data for sample {args.hest1k_sid}")
         expr_df, image_paths = load_hest1k_singlecell_data(
             args.hest1k_sid, args.hest1k_base_dir, img_size=args.img_size, img_channels=args.img_channels
