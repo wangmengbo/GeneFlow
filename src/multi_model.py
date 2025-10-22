@@ -32,6 +32,7 @@ class ResidualBlock(nn.Module):
     def forward(self, x):
         return self.main_branch(x) + self.skip(x)
 
+
 # ======================================
 # RNA Encoder with Cell Aggregation
 # ======================================
@@ -44,23 +45,33 @@ class MultiCellRNAEncoder(nn.Module):
     3. Improved cell aggregation using multi-head attention
     """
     def __init__(self, input_dim, hidden_dims=[512, 256], output_dim=128, concat_mask=False,
-                 dropout=0.1, use_gene_relations=True, relation_rank=50, num_aggregation_heads=4): # Added relation_rank, renamed num_heads
+             dropout=0.1, use_gene_relations=True, relation_rank=50, num_aggregation_heads=4,
+             # Ablation flags (matching single-cell encoder)
+             use_gene_attention=True,
+             use_multi_head_attention=True,
+             use_feature_gating=True,
+             use_residual_blocks=True,
+             use_layer_norm=True):
         super().__init__()
         self.input_dim = input_dim # Number of genes
         self.output_dim = output_dim
         self.concat_mask = concat_mask
         self.use_gene_relations = use_gene_relations
         self.relation_rank = relation_rank # K: the rank for factorization
+        self.use_gene_attention = use_gene_attention
+        self.use_multi_head_attention = use_multi_head_attention
+        self.use_feature_gating = use_feature_gating
+        self.use_residual_blocks = use_residual_blocks
+        self.use_layer_norm = use_layer_norm
 
         # Gene importance attention (applied after relational modeling)
-        self.gene_attention = nn.Parameter(torch.ones(input_dim) / input_dim)
+        if self.use_gene_attention:
+            self.gene_attention = nn.Parameter(torch.ones(input_dim) / input_dim)
 
         if use_gene_relations:
-            # This network part takes the raw gene expression x_flat [B*C, G]
-            # and produces a cell-specific embedding.
             self.gene_relation_net_base = nn.Sequential(
-                nn.Linear(input_dim, 256),  # Takes x_flat [B*C, G] as input
-                nn.LayerNorm(256),
+                nn.Linear(input_dim, 256),
+                nn.LayerNorm(256) if self.use_layer_norm else nn.Identity(),
                 nn.SiLU(),
                 nn.Dropout(dropout)
             )
@@ -77,45 +88,59 @@ class MultiCellRNAEncoder(nn.Module):
         prev_dim = cell_encoder_input_dim
         cell_layers = []
         for i, hidden_dim in enumerate(hidden_dims):
-            cell_layers.append(nn.LayerNorm(prev_dim))
-            cell_layers.append(ResidualBlock(prev_dim, hidden_dim, dropout))
+            if self.use_layer_norm:
+                cell_layers.append(nn.LayerNorm(prev_dim))
+            
+            if self.use_residual_blocks:
+                cell_layers.append(ResidualBlock(prev_dim, hidden_dim, dropout))
+            else:
+                # Simple linear layers without residual connections
+                cell_layers.extend([
+                    nn.Linear(prev_dim, hidden_dim),
+                    nn.SiLU(),
+                    nn.Dropout(dropout)
+                ])
             prev_dim = hidden_dim
-        self.cell_encoder = nn.Sequential(*cell_layers) # Outputs per-cell embeddings of size `prev_dim`
+        self.cell_encoder = nn.Sequential(*cell_layers)
 
         # Multi-head attention for cell aggregation
-        self.num_aggregation_heads = num_aggregation_heads # Renamed to avoid confusion
-        # The input to this attention is the output of cell_encoder, which has `prev_dim` channels
-        self.cell_aggregation_attention = nn.Sequential(
-            nn.LayerNorm(prev_dim),
-            nn.Linear(prev_dim, prev_dim), # Or directly to num_aggregation_heads if simpler
-            nn.SiLU(),
-            nn.Linear(prev_dim, self.num_aggregation_heads)
-        )
+        self.num_aggregation_heads = num_aggregation_heads
+        if self.use_multi_head_attention:
+            self.cell_aggregation_attention = nn.Sequential(
+                nn.LayerNorm(prev_dim) if self.use_layer_norm else nn.Identity(),
+                nn.Linear(prev_dim, prev_dim),
+                nn.SiLU(),
+                nn.Linear(prev_dim, self.num_aggregation_heads)
+            )
         
         # Head-specific projections for cell aggregation (optional, can make it more powerful)
         # Each head processes the `prev_dim` cell embedding
         self.aggregation_head_projections = nn.ModuleList([
             nn.Sequential(
-                nn.LayerNorm(prev_dim),
-                nn.Linear(prev_dim, prev_dim), # Each head could learn a different transformation
+                nn.LayerNorm(prev_dim) if self.use_layer_norm else nn.Identity(),
+                nn.Linear(prev_dim, prev_dim),
                 nn.SiLU()
             ) for _ in range(self.num_aggregation_heads)
         ])
 
         # Final encoding after cell aggregation
         # The input dimension here is `prev_dim` because we aggregate the `prev_dim` features from heads
-        self.final_encoder = nn.Sequential(
-            nn.LayerNorm(prev_dim),
+        final_layers = []
+        if self.use_layer_norm:
+            final_layers.append(nn.LayerNorm(prev_dim))
+        final_layers.extend([
             nn.Linear(prev_dim, output_dim),
-            nn.Dropout(dropout),
-            nn.LayerNorm(output_dim)
-        )
+            nn.Dropout(dropout)
+        ])
+        if self.use_layer_norm:
+            final_layers.append(nn.LayerNorm(output_dim))
+        self.final_encoder = nn.Sequential(*final_layers)
 
-        # Optional: feature gating mechanism
-        self.feature_gate = nn.Sequential(
-            nn.Linear(output_dim, output_dim),
-            nn.Sigmoid()
-        )
+        if self.use_feature_gating:
+            self.feature_gate = nn.Sequential(
+                nn.Linear(output_dim, output_dim),
+                nn.Sigmoid()
+            )
 
     def apply_gene_relations(self, x_input_genes):
         """Apply learned gene-gene relationships using low-rank factorization.
@@ -164,9 +189,11 @@ class MultiCellRNAEncoder(nn.Module):
 
         # Apply gene attention (learned global importance for genes)
         # gene_attention is [G]
-        gene_att_weights = F.softmax(self.gene_attention, dim=0)
-        # x_weighted is [B*C_max, G]
-        x_weighted = x_reshaped * gene_att_weights
+        if self.use_gene_attention:
+            gene_att_weights = F.softmax(self.gene_attention, dim=0)
+            x_weighted = x_reshaped * gene_att_weights
+        else:
+            x_weighted = x_reshaped
 
         # Apply mask if provided (mask should correspond to x_reshaped if used here)
         if mask is not None and self.concat_mask:
@@ -191,54 +218,52 @@ class MultiCellRNAEncoder(nn.Module):
         else: # If num_cells not provided, assume all cells in max_cells_in_patch are valid
             cell_agg_mask[:, :, :] = 1.0
 
-        # --- Multi-head attention for cell aggregation ---
-        # 1. Get attention logits for each head
-        # cell_embeddings_batched: [B, C_max, D_cell_emb]
-        # attention_logits: [B, C_max, num_aggregation_heads]
-        attention_logits = self.cell_aggregation_attention(cell_embeddings_batched)
+        if self.use_multi_head_attention and self.num_aggregation_heads > 0:
+            # 1. Get attention logits for each head
+            attention_logits = self.cell_aggregation_attention(cell_embeddings_batched)
 
-        # Apply mask to attention logits (before softmax)
-        # Fill masked positions with a large negative number
-        attention_logits = attention_logits.masked_fill(cell_agg_mask == 0, float('-inf'))
+            # Apply mask to attention logits (before softmax)
+            attention_logits = attention_logits.masked_fill(cell_agg_mask == 0, float('-inf'))
 
-        # Transpose for softmax over cells per head: [B, num_aggregation_heads, C_max]
-        attention_logits_transposed = attention_logits.permute(0, 2, 1)
-        # cell_attention_weights: [B, num_aggregation_heads, C_max]
-        cell_attention_weights = F.softmax(attention_logits_transposed, dim=2)
+            # Transpose for softmax over cells per head: [B, num_aggregation_heads, C_max]
+            attention_logits_transposed = attention_logits.permute(0, 2, 1)
+            cell_attention_weights = F.softmax(attention_logits_transposed, dim=2)
 
-        # 2. Apply head-specific projections and aggregate
-        aggregated_head_outputs = []
-        for h in range(self.num_aggregation_heads):
-            # Projected cell embeddings for this head: [B, C_max, D_cell_emb]
-            projected_embeddings = self.aggregation_head_projections[h](cell_embeddings_batched)
-            
-            # Weights for this head: [B, 1, C_max] (unsqueeze for broadcasting)
-            current_head_weights = cell_attention_weights[:, h, :].unsqueeze(1)
-            
-            # Weighted sum: [B, 1, C_max] @ [B, C_max, D_cell_emb] -> [B, 1, D_cell_emb]
-            weighted_sum = torch.bmm(current_head_weights, projected_embeddings)
-            aggregated_head_outputs.append(weighted_sum.squeeze(1)) # Squeeze to [B, D_cell_emb]
+            # 2. Apply head-specific projections and aggregate
+            aggregated_head_outputs = []
+            for h in range(self.num_aggregation_heads):
+                projected_embeddings = self.aggregation_head_projections[h](cell_embeddings_batched)
+                current_head_weights = cell_attention_weights[:, h, :].unsqueeze(1)
+                weighted_sum = torch.bmm(current_head_weights, projected_embeddings)
+                aggregated_head_outputs.append(weighted_sum.squeeze(1))
 
-        # Combine head outputs - e.g., by averaging or concatenating
-        # Averaging to keep dimension `D_cell_emb` (which is `prev_dim` from __init__)
-        if self.num_aggregation_heads > 0:
-            aggregated_features = torch.stack(aggregated_head_outputs, dim=1).mean(dim=1) # [B, D_cell_emb]
-        else: # Fallback if no heads (should not happen with num_aggregation_heads > 0)
-            aggregated_features = cell_embeddings_batched.mean(dim=1) # Simple averaging if no attention heads
-
+            aggregated_features = torch.stack(aggregated_head_outputs, dim=1).mean(dim=1)
+        else:
+            # Simple mean pooling without multi-head attention
+            # Apply mask for mean pooling
+            masked_embeddings = cell_embeddings_batched * cell_agg_mask
+            sum_embeddings = masked_embeddings.sum(dim=1)
+            num_valid_cells = cell_agg_mask.sum(dim=1).clamp(min=1)
+            aggregated_features = sum_embeddings / num_valid_cells
 
         # Final encoding layer
         final_embeddings = self.final_encoder(aggregated_features) # Input [B, D_cell_emb], Output [B, output_dim]
 
         # Apply feature gating
-        gates = self.feature_gate(final_embeddings)
-        gated_embeddings = final_embeddings * gates
+        if self.use_feature_gating:
+            gates = self.feature_gate(final_embeddings)
+            gated_embeddings = final_embeddings * gates
+        else:
+            gated_embeddings = final_embeddings
 
         return gated_embeddings
 
     def get_gene_importance(self):
         """Return the learned importance of each gene (global attention)"""
-        return F.softmax(self.gene_attention, dim=0)
+        if self.use_gene_attention:
+            return F.softmax(self.gene_attention, dim=0)
+        else:
+            return torch.ones(self.input_dim, device=next(self.parameters()).device) / self.input_dim
 
 
 # ======================================
@@ -273,7 +298,13 @@ class MultiCellRNAtoHnEModel(nn.Module):
         encoder_output_dim_multiplier=4, # Multiplies model_channels for rna_embed_dim
         use_gene_relations=True,
         relation_rank=50,
-        num_aggregation_heads=4
+        num_aggregation_heads=4 ,
+        # Ablation parameters
+        use_gene_attention=True,
+        use_multi_head_attention=True,
+        use_feature_gating=True,
+        use_residual_blocks=True,
+        use_layer_norm=True
     ):
         super().__init__()
 
@@ -287,12 +318,17 @@ class MultiCellRNAtoHnEModel(nn.Module):
         self.rna_encoder = MultiCellRNAEncoder(
             input_dim=rna_dim,
             hidden_dims=encoder_hidden_dims,
-            output_dim=rna_encoder_output_dim, # This will be rna_embed_dim for UNet
+            output_dim=rna_encoder_output_dim,
             concat_mask=concat_mask,
             dropout=dropout,
             use_gene_relations=use_gene_relations,
             relation_rank=relation_rank,
-            num_aggregation_heads=num_aggregation_heads
+            num_aggregation_heads=num_aggregation_heads,
+            use_gene_attention=use_gene_attention,
+            use_multi_head_attention=use_multi_head_attention,
+            use_feature_gating=use_feature_gating,
+            use_residual_blocks=use_residual_blocks,
+            use_layer_norm=use_layer_norm
         )
 
         # UNet model for flow matching
@@ -380,3 +416,4 @@ def prepare_multicell_batch(batch, device):
         'gene_expr': gene_expr_tensor, # Should be [B, C_max, G]
         'num_cells': num_cells # Should be [B], indicating actual cells per item
     }
+

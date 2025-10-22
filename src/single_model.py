@@ -19,46 +19,6 @@ logger = logging.getLogger(__name__)
 # RNA Encoder
 # ======================================
 
-# class RNAEncoder(nn.Module):
-#     """
-#     Encoder for RNA expression data that produces embeddings for conditioning the UNet.
-#     """
-#     def __init__(self, input_dim, hidden_dims=[512, 256], output_dim=128, concat_mask=False):
-#         super().__init__()
-#         # Add attention weights for genes
-#         self.gene_attention = nn.Parameter(torch.ones(input_dim) / input_dim)
-#         # Rest of encoder remains the same
-#         layers = []
-
-#         if concat_mask:
-#             self.concat_mask = True
-#             first_layer_input_dim = input_dim * 2
-#             prev_dim = first_layer_input_dim
-#         else:
-#             self.concat_mask = False
-#             prev_dim = input_dim
-        
-#         for hidden_dim in hidden_dims:
-#             layers.append(nn.Linear(prev_dim, hidden_dim))
-#             layers.append(nn.LayerNorm(hidden_dim))
-#             layers.append(nn.SiLU())
-#             prev_dim = hidden_dim
-            
-#         layers.append(nn.Linear(prev_dim, output_dim))
-#         self.encoder = nn.Sequential(*layers)
-        
-#     def forward(self, x, mask=None):
-#         # Apply attention to genes
-#         attention = F.softmax(self.gene_attention, dim=0)
-#         x_weighted = x * attention
-#         if mask is not None and self.concat_mask:
-#             x_weighted = torch.cat((x_weighted, mask.to(x_weighted.dtype)), dim=1)
-#         return self.encoder(x_weighted)
-        
-#     def get_gene_importance(self):
-#         """Return the learned importance of each gene"""
-#         return F.softmax(self.gene_attention, dim=0)
-
 # Helper Residual Block for the encoder
 class ResidualBlock(nn.Module):
     """Residual block with normalization and dropout"""
@@ -78,37 +38,49 @@ class ResidualBlock(nn.Module):
     def forward(self, x):
         return self.main_branch(x) + self.skip(x)
 
+
 class RNAEncoder(nn.Module):
     """
-    Enhanced encoder for RNA expression data with low-rank gene relations.
+    Enhanced encoder for RNA expression data with ablation capabilities.
     """
     def __init__(self, input_dim, hidden_dims=[512, 256], output_dim=128, concat_mask=False,
-                 dropout=0.1, use_gene_relations=True, num_heads=4, relation_rank=50): # Added relation_rank
+                 dropout=0.1, use_gene_relations=True, num_heads=4, relation_rank=50,
+                 # Ablation flags
+                 use_gene_attention=True,
+                 use_multi_head_attention=True, 
+                 use_feature_gating=True,
+                 use_residual_blocks=True,
+                 use_layer_norm=True):
         super().__init__()
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.concat_mask = concat_mask
         self.use_gene_relations = use_gene_relations
         self.num_heads = num_heads
-        self.relation_rank = relation_rank  # K: the rank for factorization
+        self.relation_rank = relation_rank
+        
+        # Ablation flags
+        self.use_gene_attention = use_gene_attention
+        self.use_multi_head_attention = use_multi_head_attention
+        self.use_feature_gating = use_feature_gating
+        self.use_residual_blocks = use_residual_blocks
+        self.use_layer_norm = use_layer_norm
 
-        # Gene importance attention
-        self.gene_attention = nn.Parameter(torch.ones(input_dim) / input_dim)
+        # Gene importance attention (ablatable)
+        if self.use_gene_attention:
+            self.gene_attention = nn.Parameter(torch.ones(input_dim) / input_dim)
 
+        # Gene relations network (existing ablation via use_gene_relations)
         if use_gene_relations:
-            # This network part takes the raw gene expression x [B, G]
-            # and produces a cell-specific embedding.
             self.gene_relation_net_base = nn.Sequential(
-                nn.Linear(input_dim, 256),  # Takes x [B, G] as input
-                nn.LayerNorm(256),
+                nn.Linear(input_dim, 256),
+                nn.LayerNorm(256) if self.use_layer_norm else nn.Identity(),
                 nn.SiLU(),
                 nn.Dropout(dropout)
             )
-            # This head predicts the parameters for the low-rank factor matrices U and V.
-            # It needs to output 2 * num_genes * relation_rank parameters.
             self.gene_relation_factors_head = nn.Linear(256, 2 * input_dim * self.relation_rank)
 
-        # Encoder layers with residual connections
+        # Encoder layers with optional residual connections and layer norm
         layers = []
         current_encoder_input_dim = input_dim
         if concat_mask:
@@ -116,55 +88,65 @@ class RNAEncoder(nn.Module):
         
         prev_dim = current_encoder_input_dim
         for i, hidden_dim in enumerate(hidden_dims):
-            layers.append(nn.LayerNorm(prev_dim))
-            layers.append(ResidualBlock(prev_dim, hidden_dim, dropout))
+            if self.use_layer_norm:
+                layers.append(nn.LayerNorm(prev_dim))
+            
+            if self.use_residual_blocks:
+                layers.append(ResidualBlock(prev_dim, hidden_dim, dropout))
+            else:
+                # Simple linear layers without residual connections
+                layers.extend([
+                    nn.Linear(prev_dim, hidden_dim),
+                    nn.SiLU(),
+                    nn.Dropout(dropout)
+                ])
             prev_dim = hidden_dim
         self.encoder = nn.Sequential(*layers)
 
-        # Multi-head attention for feature extraction
-        self.feature_attention = nn.Sequential(
-            nn.LayerNorm(prev_dim),
-            nn.Linear(prev_dim, prev_dim),
-            nn.SiLU(),
-            nn.Linear(prev_dim, self.num_heads)
-        )
-
-        self.head_projections = nn.ModuleList([
-            nn.Sequential(
-                nn.LayerNorm(prev_dim),
+        # Multi-head attention for feature extraction (ablatable)
+        if self.use_multi_head_attention:
+            self.feature_attention = nn.Sequential(
+                nn.LayerNorm(prev_dim) if self.use_layer_norm else nn.Identity(),
                 nn.Linear(prev_dim, prev_dim),
-                nn.SiLU()
-            ) for _ in range(self.num_heads)
-        ])
+                nn.SiLU(),
+                nn.Linear(prev_dim, self.num_heads)
+            )
+
+            self.head_projections = nn.ModuleList([
+                nn.Sequential(
+                    nn.LayerNorm(prev_dim) if self.use_layer_norm else nn.Identity(),
+                    nn.Linear(prev_dim, prev_dim),
+                    nn.SiLU()
+                ) for _ in range(self.num_heads)
+            ])
 
         # Final integration layer
-        self.final_encoder = nn.Sequential(
-            nn.LayerNorm(prev_dim), # Input is aggregated_features which has size prev_dim
+        final_layers = []
+        if self.use_layer_norm:
+            final_layers.append(nn.LayerNorm(prev_dim))
+        final_layers.extend([
             nn.Linear(prev_dim, output_dim),
-            nn.Dropout(dropout),
-            nn.LayerNorm(output_dim)
-        )
+            nn.Dropout(dropout)
+        ])
+        if self.use_layer_norm:
+            final_layers.append(nn.LayerNorm(output_dim))
+        
+        self.final_encoder = nn.Sequential(*final_layers)
 
-        # Feature gating mechanism
-        self.feature_gate = nn.Sequential(
-            nn.Linear(output_dim, output_dim),
-            nn.Sigmoid()
-        )
+        # Feature gating mechanism (ablatable)
+        if self.use_feature_gating:
+            self.feature_gate = nn.Sequential(
+                nn.Linear(output_dim, output_dim),
+                nn.Sigmoid()
+            )
 
     def apply_gene_relations(self, x):
-        """Apply learned gene-gene relationships using low-rank factorization.
-        x shape: [batch_size, num_genes]
-        """
+        """Apply learned gene-gene relationships using low-rank factorization."""
         batch_size, num_genes = x.shape
 
-        # 1. Get cell-specific embedding from raw gene expression
-        cell_embedding_for_relations = self.gene_relation_net_base(x)  # [B, 256]
-
-        # 2. Predict parameters for U and V factor matrices from this embedding
-        # Output shape: [B, 2 * num_genes * relation_rank]
+        cell_embedding_for_relations = self.gene_relation_net_base(x)
         relation_factors_params = self.gene_relation_factors_head(cell_embedding_for_relations)
 
-        # 3. Reshape to get U [B, G, K] and V [B, K, G] matrices per cell
         U = relation_factors_params[:, :num_genes * self.relation_rank].view(
             batch_size, num_genes, self.relation_rank
         )
@@ -172,16 +154,10 @@ class RNAEncoder(nn.Module):
             batch_size, self.relation_rank, num_genes
         )
 
-        # 4. Apply the transformation: x_enhanced_contribution = (x @ U) @ V
-        # x_unsqueezed is [B, 1, G]
         x_unsqueezed = x.unsqueeze(1)
-        # temp is [B, 1, K] (result of [B, 1, G] @ [B, G, K])
         temp = torch.bmm(x_unsqueezed, U)
-        # x_transformed is [B, G] (result of [B, 1, K] @ [B, K, G] -> [B, 1, G] -> squeezed)
         x_transformed_by_uv = torch.bmm(temp, V).squeeze(1)
 
-        # Add the learned relational enhancement to the original expression
-        # The 0.1 scaling factor was in your original code. Consider making it learnable or tuning it.
         return x + 0.1 * x_transformed_by_uv
 
     def forward(self, x, mask=None):
@@ -191,30 +167,48 @@ class RNAEncoder(nn.Module):
         if self.use_gene_relations:
             x_processed = self.apply_gene_relations(x_processed)
 
-        attention = F.softmax(self.gene_attention, dim=0)
-        x_weighted = x_processed * attention
+        # Apply gene attention (ablatable)
+        if self.use_gene_attention:
+            attention = F.softmax(self.gene_attention, dim=0)
+            x_weighted = x_processed * attention
+        else:
+            x_weighted = x_processed
 
         if mask is not None and self.concat_mask:
             x_weighted = torch.cat((x_weighted, mask.to(x_weighted.dtype)), dim=1)
 
         embeddings = self.encoder(x_weighted)
 
-        attention_logits = self.feature_attention(embeddings)
-        head_attention_weights = F.softmax(attention_logits, dim=1).unsqueeze(-1)
+        # Multi-head attention processing (ablatable)
+        if self.use_multi_head_attention:
+            attention_logits = self.feature_attention(embeddings)
+            head_attention_weights = F.softmax(attention_logits, dim=1).unsqueeze(-1)
 
-        head_outputs = torch.stack([proj(embeddings) for proj in self.head_projections], dim=1)
-        
-        weighted_outputs = head_outputs * head_attention_weights
-        aggregated_features = weighted_outputs.sum(dim=1)
+            head_outputs = torch.stack([proj(embeddings) for proj in self.head_projections], dim=1)
+            
+            weighted_outputs = head_outputs * head_attention_weights
+            aggregated_features = weighted_outputs.sum(dim=1)
+        else:
+            # Simple processing without multi-head attention
+            aggregated_features = embeddings
 
         final_embeddings = self.final_encoder(aggregated_features)
-        gates = self.feature_gate(final_embeddings)
-        gated_embeddings = final_embeddings * gates
+        
+        # Feature gating (ablatable)
+        if self.use_feature_gating:
+            gates = self.feature_gate(final_embeddings)
+            gated_embeddings = final_embeddings * gates
+        else:
+            gated_embeddings = final_embeddings
 
         return gated_embeddings
 
     def get_gene_importance(self):
-        return F.softmax(self.gene_attention, dim=0)
+        if self.use_gene_attention:
+            return F.softmax(self.gene_attention, dim=0)
+        else:
+            return torch.ones(self.input_dim) / self.input_dim  # Uniform importance if no attention
+
 
 # ======================================
 # RNA to H&E Cell Image Model
@@ -243,6 +237,13 @@ class RNAtoHnEModel(nn.Module):
         use_new_attention_order=True,
         concat_mask=False,
         relation_rank=50,
+        # Ablation parameters
+        use_gene_attention=True,
+        use_multi_head_attention=True,
+        use_feature_gating=True,
+        use_residual_blocks=True,
+        use_layer_norm=True,
+        use_gene_relations=True,
     ):
         super().__init__()
         
@@ -250,16 +251,22 @@ class RNAtoHnEModel(nn.Module):
         self.img_channels = img_channels
         self.img_size = img_size
 
-        # RNA expression encoder
+        # RNA expression encoder with ablation support
         self.rna_encoder = RNAEncoder(
             input_dim=rna_dim,
             hidden_dims=[512, 256],
             output_dim=model_channels * 4,  # Match time_embed_dim
             concat_mask=concat_mask,
-            relation_rank=relation_rank
+            relation_rank=relation_rank,
+            use_gene_attention=use_gene_attention,
+            use_multi_head_attention=use_multi_head_attention,
+            use_feature_gating=use_feature_gating,
+            use_residual_blocks=use_residual_blocks,
+            use_layer_norm=use_layer_norm,
+            use_gene_relations=use_gene_relations,
         )
         
-        # UNet model for flow matching
+        # UNet model for flow matching (unchanged)
         self.unet = RNAConditionedUNet(
             in_channels=img_channels,
             model_channels=model_channels,
@@ -284,7 +291,8 @@ class RNAtoHnEModel(nn.Module):
         Args:
             x: Input image tensor [B, C, H, W]
             t: Timestep tensor [B]
-            rna_expr: RNA expression tensor [B, rna_dim]
+            gene_expr: RNA expression tensor [B, rna_dim]
+            gene_mask: Optional gene mask tensor [B, rna_dim]
             
         Returns:
             Predicted velocity field for the flow matching model

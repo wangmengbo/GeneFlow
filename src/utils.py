@@ -4,57 +4,354 @@ import numpy as np
 import scanpy as sc
 import pandas as pd
 from tqdm import tqdm
-import argparse, logging
+import argparse
+import logging
+import hashlib
+import json
+from torch.utils.data import Dataset, DataLoader
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+
+def setup_logging(rank):
+    """Setup logging for DDP - only rank 0 logs to avoid spam"""
+    if rank == 0:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        )
+    else:
+        logging.basicConfig(level=logging.WARNING)
+    return logging.getLogger(__name__)
+
+
+def get_stable_run_id(args):
+    """Generate stable ID based on core experiment params, not training params"""
+    # Only include params that define the experiment identity
+    stable_params = {
+        'model_type': args.model_type,
+        'samples': args.hest1k_xenium_samples,
+        'img_size': args.img_size,
+        'img_channels': args.img_channels,
+        'seed': args.seed,
+        # Add other params that define the experiment
+    }
+    import hashlib
+    stable_str = json.dumps(stable_params, sort_keys=True)
+    return hashlib.md5(stable_str.encode()).hexdigest()[:8]
+    
+
+def save_checkpoint(state, filename, rank, is_best=False, keep_latest_pointer=True):
+    """Save checkpoint only on rank 0 with optional pointers"""
+    if rank == 0:
+        # Get logger
+        logger = logging.getLogger(__name__)
+        
+        # Save the actual checkpoint
+        torch.save(state, filename)
+        logger.info(f"Checkpoint saved: {filename}")
+        
+        # Create pointer to latest checkpoint
+        if keep_latest_pointer:
+            checkpoint_dir = os.path.dirname(filename)
+            latest_link = os.path.join(checkpoint_dir, "latest_checkpoint.pt")
+            
+            # Remove old symlink/file if exists
+            if os.path.exists(latest_link) or os.path.islink(latest_link):
+                os.remove(latest_link)
+            
+            # Create symlink (or copy if symlink fails on Windows)
+            try:
+                os.symlink(os.path.basename(filename), latest_link)
+            except (OSError, NotImplementedError):
+                import shutil
+                shutil.copy2(filename, latest_link)
+            
+            logger.info(f"Latest checkpoint pointer updated: {latest_link}")
+        
+        # Create pointer to best checkpoint
+        if is_best:
+            checkpoint_dir = os.path.dirname(filename)
+            best_link = os.path.join(checkpoint_dir, "best_checkpoint.pt")
+            
+            # Remove old symlink/file if exists
+            if os.path.exists(best_link) or os.path.islink(best_link):
+                os.remove(best_link)
+            
+            # Create symlink (or copy if symlink fails)
+            try:
+                os.symlink(os.path.basename(filename), best_link)
+            except (OSError, NotImplementedError):
+                import shutil
+                shutil.copy2(filename, best_link)
+            
+            logger.info(f"Best checkpoint pointer updated: {best_link}")
+
+
+def save_checkpoint_with_spatial_info(
+    checkpoint_path,
+    epoch,
+    model,
+    optimizer,
+    lr_scheduler,
+    best_val_loss,
+    train_loss,
+    val_loss,
+    scaler=None,
+    spatial_loss_enabled=False,
+    spatial_loss_start_epoch=None
+):
+    """Save checkpoint with spatial loss information"""
+    if isinstance(model, DDP):
+        model_state_dict = model.module.state_dict()
+    else:
+        model_state_dict = model.state_dict()
+    
+    checkpoint_state = {
+        'epoch': epoch,
+        'model_state_dict': model_state_dict,
+        'optimizer_state_dict': optimizer.state_dict(),
+        'lr_scheduler_state_dict': lr_scheduler.state_dict(),
+        'best_val_loss': best_val_loss,
+        'train_loss': train_loss,
+        'val_loss': val_loss,
+        'spatial_loss_enabled': spatial_loss_enabled,
+        'spatial_loss_start_epoch': spatial_loss_start_epoch,
+    }
+    if scaler is not None:
+        checkpoint_state['scaler_state_dict'] = scaler.state_dict()
+    
+    torch.save(checkpoint_state, checkpoint_path)
+
+
+def load_checkpoint(filename, model, optimizer, device):
+    """Load checkpoint and handle DDP model state dict"""
+    checkpoint = torch.load(filename, map_location=device)
+    
+    # Handle DDP model state dict (remove 'module.' prefix if present)
+    model_state_dict = checkpoint['model_state_dict']
+    if isinstance(model, DDP):
+        # If loading into DDP model, ensure state dict matches
+        if not any(key.startswith('module.') for key in model_state_dict.keys()):
+            model_state_dict = {f'module.{k}': v for k, v in model_state_dict.items()}
+    else:
+        # If loading into non-DDP model, remove 'module.' prefix
+        model_state_dict = {k.replace('module.', ''): v for k, v in model_state_dict.items()}
+    
+    model.load_state_dict(model_state_dict)
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    
+    # Ensure optimizer state is on correct device
+    for state in optimizer.state.values():
+        for k, v in state.items():
+            if isinstance(v, torch.Tensor):
+                state[k] = v.to(device)
+    
+    start_epoch = checkpoint['epoch'] + 1
+    best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+    return start_epoch, best_val_loss
+
+
+def setup_ddp():
+    """Initialize DDP environment"""
+    # Get rank and world size from environment (set by torchrun)
+    rank = int(os.environ.get('RANK', 0))
+    local_rank = int(os.environ.get('LOCAL_RANK', 0))
+    world_size = int(os.environ.get('WORLD_SIZE', 1))
+    
+    # Initialize process group
+    dist.init_process_group(backend='nccl')
+    
+    # Set device for this process
+    torch.cuda.set_device(local_rank)
+    device = torch.device(f'cuda:{local_rank}')
+    
+    return rank, local_rank, world_size, device
+
+
+def cleanup_ddp():
+    """Cleanup DDP environment"""
+    if dist.is_initialized():
+        dist.destroy_process_group()
+        
+
+def get_hash(namespace):
+    """
+    Generate an 8-character hash from argparse Namespace object.
+    
+    Args:
+        namespace: argparse.Namespace object from parse_args()
+        
+    Returns:
+        str: 8-character hexadecimal hash
+    """
+    # Convert namespace to dict and create hash
+    data = json.dumps(vars(namespace), sort_keys=True, default=str)
+    return hashlib.sha256(data.encode()).hexdigest()[:8]
 
 
 def setup_parser(parser=None):
+    """
+    Add common arguments used across train, generate, and evaluate scripts.
+    Call this AFTER adding script-specific arguments.
+    """
     if parser is None:
-        parser = argparse.ArgumentParser(description="A tool for generating and managing prompts.")
+        parser = argparse.ArgumentParser(description="RNA to H&E image generation tool")
 
-    # general arguments for data loading
-    parser.add_argument("--adata", type=str, default="cell_256_aux/input/adata_unfiltered.h5ad", help="Path to the AnnData object.")
-    parser.add_argument("--layer", type=str, default=None, help="Layer to use for the AnnData object.")
-    parser.add_argument("--cell_type", type=str, nargs='*', default=None)
-    parser.add_argument("--exclude_cell_type", type=str, nargs='*', default=None)
-    parser.add_argument("--cell_type_label", type=str, default="cell_type")
-    parser.add_argument("--min_total_counts", type=int, default=0)
-    parser.add_argument("--max_total_counts", type=int, default=np.inf)
-    parser.add_argument("--min_total_pct", type=float, default=0.0)
-    parser.add_argument("--max_total_pct", type=float, default=1.0)
-    parser.add_argument("--use_full_gene_list", action="store_true", default=False, help="Use the full gene list instead of the top 1000 highly variable genes.")
-    parser.add_argument("--gene_symbols", type=str, default=None, help="Path to the gene symbol list.")
-    parser.add_argument("--only_inference", action="store_true", default=False, help="Only run inference.")
-    parser.add_argument('--only_importance_anlaysis', action='store_true', default=False, help='Only run gene importance analysis.')
-    parser.add_argument('--analysis_timesteps', type=float, nargs='+', default=[0.1, 0.3, 0.5, 0.7, 0.9], help='List of timesteps (0 to 1) to use for importance analysis.')
-    parser.add_argument('--analysis_batches', type=int, default=10, help='Number of validation batches to use for importance analysis.')
-    parser.add_argument('--missing_gene_symbols', type=str, default=None, help='Path to a file containing missing gene symbols, one per line.')
-    parser.add_argument('--concat_mask', action='store_true', default=False, help='Concatenate mask to the input of the RNA encoder.')
-    parser.add_argument('--relation_rank', type=int, default=50, 
-                        help='Rank K for low-rank factorization in gene relation network (default: 50).')
-    parser.add_argument('--num_aggregation_heads', type=int, default=4, 
-                        help='Number of heads for cell aggregation in MultiCellRNAEncoder (multi-cell only, default: 4).')
-    parser.add_argument('--cell_id_to_generate', type=str, default=None, nargs='*',
-                        help='Cell IDs to generate images for. If not provided, all cells will be used.')
+    # ============================================================================
+    # Model Architecture Arguments
+    # ============================================================================
+    arch_group = parser.add_argument_group('Model Architecture')
+    arch_group.add_argument('--use_gene_attention', action='store_true', default=True, 
+                           help='Use gene attention mechanism (single-cell only)')
+    arch_group.add_argument('--no_gene_attention', dest='use_gene_attention', action='store_false', 
+                           help='Disable gene attention mechanism')
+    arch_group.add_argument('--use_multi_head_attention', action='store_true', default=True, 
+                           help='Use multi-head attention')
+    arch_group.add_argument('--no_multi_head_attention', dest='use_multi_head_attention', action='store_false', 
+                           help='Disable multi-head attention')
+    arch_group.add_argument('--use_feature_gating', action='store_true', default=True, 
+                           help='Use feature gating')
+    arch_group.add_argument('--no_feature_gating', dest='use_feature_gating', action='store_false', 
+                           help='Disable feature gating')
+    arch_group.add_argument('--use_residual_blocks', action='store_true', default=True, 
+                           help='Use residual blocks')
+    arch_group.add_argument('--no_residual_blocks', dest='use_residual_blocks', action='store_false', 
+                           help='Disable residual blocks')
+    arch_group.add_argument('--use_layer_norm', action='store_true', default=True, 
+                           help='Use layer normalization')
+    arch_group.add_argument('--no_layer_norm', dest='use_layer_norm', action='store_false', 
+                           help='Disable layer normalization')
+    arch_group.add_argument('--use_gene_relations', action='store_true', default=True, 
+                           help='Use gene relations')
+    arch_group.add_argument('--no_gene_relations', dest='use_gene_relations', action='store_false', 
+                           help='Disable gene relations')
+    arch_group.add_argument('--concat_mask', action='store_true', default=False, 
+                           help='Concatenate mask to the input of the RNA encoder')
+    arch_group.add_argument('--relation_rank', type=int, default=50, 
+                           help='Rank K for low-rank factorization in gene relation network (default: 50)')
+    arch_group.add_argument('--num_aggregation_heads', type=int, default=4, 
+                           help='Number of heads for cell aggregation in MultiCellRNAEncoder (multi-cell only, default: 4)')
+
+    # ============================================================================
+    # Model Configuration Arguments
+    # ============================================================================
+    model_group = parser.add_argument_group('Model Configuration')
+    model_group.add_argument('--model_type', type=str, choices=['single', 'multi'], default='multi',
+                            help='Type of model to use: single-cell or multi-cell')
+    model_group.add_argument('--img_size', type=int, default=256, 
+                            help='Size of the generated images')
+    model_group.add_argument('--img_channels', type=int, default=3, 
+                            help='Number of image channels (3 for RGB, 4 for RGB+aux)')
+    model_group.add_argument('--normalize_aux', action='store_true', 
+                            help='Normalize auxiliary channels')
+    model_group.add_argument('--gen_steps', type=int, default=100, 
+                            help='Number of steps for solver during generation')
+    model_group.add_argument('--seed', type=int, default=42, 
+                            help='Random seed for reproducibility')
+
+    # ============================================================================
+    # Data Loading Arguments
+    # ============================================================================
+    data_group = parser.add_argument_group('Data Loading')
     
-    # other general arguments
-    parser.add_argument('--output_name_prefix', type=str, default='', help='Prefix for the output evaluation files.')
-    parser.add_argument('--nsamples_test', type=int, default=-1, help='Number of batches to use for testing.')
+    # AnnData loading
+    data_group.add_argument('--adata', type=str, default=None,
+                           help='Path to the AnnData object')
+    data_group.add_argument('--layer', type=str, default=None, 
+                           help='Layer to use for the AnnData object')
+    data_group.add_argument('--cell_type', type=str, nargs='*', default=None,
+                           help='Cell types to include')
+    data_group.add_argument('--exclude_cell_type', type=str, nargs='*', default=None,
+                           help='Cell types to exclude')
+    data_group.add_argument('--cell_type_label', type=str, default='cell_type',
+                           help='Column name for cell type labels')
+    data_group.add_argument('--min_total_counts', type=int, default=0,
+                           help='Minimum total counts for filtering')
+    data_group.add_argument('--max_total_counts', type=int, default=np.inf,
+                           help='Maximum total counts for filtering')
+    data_group.add_argument('--min_total_pct', type=float, default=0.0,
+                           help='Minimum total counts percentile')
+    data_group.add_argument('--max_total_pct', type=float, default=1.0,
+                           help='Maximum total counts percentile')
+    data_group.add_argument('--use_full_gene_list', action='store_true', default=False, 
+                           help='Use the full gene list instead of top highly variable genes')
+    data_group.add_argument('--gene_symbols', type=str, default=None, 
+                           help='Path to the gene symbol list')
+    data_group.add_argument('--missing_gene_symbols', type=str, default=None, 
+                           help='Path to a file containing missing gene symbols, one per line')
     
-    parser.add_argument('--enable_stain_normalization', action='store_true',
-                        help='Enable stain normalization of generated images to real images before evaluation/generation.')
-    parser.add_argument('--stain_normalization_method', type=str, default='skimage_hist_match',
-                        choices=['skimage_hist_match', 'none'], # 'macenko', 'vahadane', 'reinhard' can be added if supported
-                        help='Stain normalization method. "skimage_hist_match" uses scikit-image. "none" for no normalization.')
+    # CSV/JSON loading (deprecated but kept for backward compatibility)
+    data_group.add_argument('--gene_expr', type=str, default=None,
+                           help='Path to gene expression CSV file (deprecated)')
+    data_group.add_argument('--image_paths', type=str, default=None,
+                           help='Path to JSON file with image paths (deprecated)')
+    data_group.add_argument('--patch_image_paths', type=str, default=None,
+                           help='Path to JSON file with patch paths (deprecated)')
+    data_group.add_argument('--patch_cell_mapping', type=str, default=None,
+                           help='Path to JSON file with mapping paths (deprecated)')
+    
+    # HEST-1k data loading
+    data_group.add_argument('--hest1k_sid', type=str, nargs='*', default=None,
+                           help='HEST-1k sample ID for direct loading')
+    data_group.add_argument('--hest1k_base_dir', type=str, default=None,
+                           help='Base directory for HEST-1k data')
+    data_group.add_argument('--hest1k_xenium_dir', type=str, default=None,
+                           help='Directory for HEST-1k Xenium AnnData files')
+    data_group.add_argument('--hest1k_xenium_metadata', type=str, default=None,
+                           help='Metadata CSV for HEST-1k Xenium data')
+    data_group.add_argument('--hest1k_xenium_samples', type=str, nargs='*', default=None,
+                           help='Specific Xenium sample IDs to use')
+    data_group.add_argument('--hest1k_xenium_fast_dir', type=str, default=None,
+                           help='Directory for reformatted fast-loading HEST-1k Xenium patch data')
+    data_group.add_argument('--num_dataloader_workers', type=int, default=4,
+                           help='Number of workers for data loading')
+    
+    # ============================================================================
+    # Output and Evaluation Arguments
+    # ============================================================================
+    output_group = parser.add_argument_group('Output and Evaluation')
+    output_group.add_argument('--output_dir', type=str, default='output',
+                             help='Directory to save outputs')
+    output_group.add_argument('--output_name_prefix', type=str, default='',
+                             help='Prefix for the output evaluation files')
+    output_group.add_argument('--cell_id_to_generate', type=str, default=None, nargs='*',
+                             help='Cell IDs to generate images for. If not provided, all cells will be used')
+    
+    # ============================================================================
+    # Inference and Analysis Arguments
+    # ============================================================================
+    inference_group = parser.add_argument_group('Inference and Analysis')
+    inference_group.add_argument('--only_inference', action='store_true', default=False,
+                                help='Only run inference')
+    inference_group.add_argument('--only_importance_analysis', action='store_true', default=False,
+                                help='Only run gene importance analysis')
+    inference_group.add_argument('--analysis_timesteps', type=float, nargs='+', 
+                                default=[0.1, 0.3, 0.5, 0.7, 0.9],
+                                help='List of timesteps (0 to 1) to use for importance analysis')
+    inference_group.add_argument('--analysis_batches', type=int, default=10,
+                                help='Number of validation batches to use for importance analysis')
+    inference_group.add_argument('--nsamples_test', type=int, default=-1,
+                                help='Number of batches to use for testing')
+    
+    # ============================================================================
+    # Stain Normalization Arguments
+    # ============================================================================
+    stain_group = parser.add_argument_group('Stain Normalization')
+    stain_group.add_argument('--enable_stain_normalization', action='store_true',
+                            help='Enable stain normalization of generated images to real images')
+    stain_group.add_argument('--stain_normalization_method', type=str, default='skimage_hist_match',
+                            choices=['skimage_hist_match', 'none'],
+                            help='Stain normalization method')
+    
     return parser
+
 
 def parse_adata(args=None, 
                 adata=None,
@@ -296,6 +593,7 @@ def analyze_gene_importance(
     
     return importance_df
 
+
 def analyze_gene_importance_diffusion(
     model,
     data_loader,
@@ -433,3 +731,49 @@ def normalize_aux(aux_image):
     aux_image = ((aux_image - np.min(aux_image) + 1e-6) / (np.max(aux_image) - np.min(aux_image) + 1e-6))
     aux_image = (aux_image * 255).astype(np.uint8)
     return aux_image
+
+
+def manage_checkpoints(checkpoint_dir, max_checkpoints, rank, suffix=""):
+    """
+    Manage checkpoint files, keeping only the most recent max_checkpoints
+    
+    Args:
+        checkpoint_dir: Directory containing checkpoints
+        max_checkpoints: Maximum number of checkpoints to keep
+        rank: Process rank (only rank 0 performs cleanup)
+        suffix: Suffix to filter checkpoints (e.g., "_spatial" or "")
+    """
+    if rank != 0:
+        return
+    
+    # Get all checkpoint files with the specified suffix (excluding symlinks)
+    all_checkpoints = []
+    for f in os.listdir(checkpoint_dir):
+        full_path = os.path.join(checkpoint_dir, f)
+        # Skip symlinks/pointers
+        if os.path.islink(full_path):
+            continue
+        # Skip files without the suffix
+        if suffix and not f.endswith(f"{suffix}.pt"):
+            continue
+        if not suffix and "_spatial.pt" in f:
+            continue  # Skip spatial checkpoints when managing non-spatial
+        # Only include actual checkpoint files
+        if f.startswith("checkpoint_epoch_") and f.endswith(".pt"):
+            all_checkpoints.append(full_path)
+    
+    if len(all_checkpoints) <= max_checkpoints:
+        return
+    
+    # Sort by modification time (oldest first)
+    all_checkpoints.sort(key=lambda x: os.path.getmtime(x))
+    
+    # Remove oldest checkpoints
+    checkpoints_to_remove = all_checkpoints[:len(all_checkpoints) - max_checkpoints]
+    for ckpt in checkpoints_to_remove:
+        try:
+            os.remove(ckpt)
+            logger.info(f"Removed old checkpoint: {os.path.basename(ckpt)}")
+        except Exception as e:
+            logger.warning(f"Failed to remove checkpoint {ckpt}: {e}")
+
