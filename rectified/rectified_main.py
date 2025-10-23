@@ -30,7 +30,7 @@ from src.dataset import (
     OnDemandMultiSampleHestXeniumDataset, multi_sample_hest_xenium_collate_fn, 
     FastSeparatePatchDataset, fast_separate_patch_collate_fn
     )
-from rectified.rectified_train_ddp import train_with_rectified_flow, generate_images_with_rectified_flow
+from rectified.rectified_train import train_with_rectified_flow, generate_images_with_rectified_flow
 
 
 def main():
