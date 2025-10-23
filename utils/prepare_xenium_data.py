@@ -23,7 +23,6 @@ import multiprocessing as mp
 from PIL import Image
 from skimage import transform
 from joblib import Parallel, delayed
-# from shapely.geometry import box
 from gene_thesaurus import GeneThesaurus
 from adjustText import adjust_text
 
@@ -127,41 +126,6 @@ def plot_image(img, show=True, mask_channel=None):
         plt.show()
     else:
         return fig
-
-
-# def plot_total_counts(adata, 
-#                       cnt_threshold: list[float,int]=None, 
-#                       pct_threshold: list[float,int]=None,
-#                       figsize=(10, 10),
-#                       show=True):
-#     fig, ax = plt.subplots()
-#     sns.ecdfplot(data=adata.obs['total_counts'], ax=ax)
-#     thresholds = []
-#     threshold_labels = []
-#     if cnt_threshold is not None:
-#         thresholds = cnt_threshold
-#         threshold_labels = [None for i in cnt_threshold]
-    
-#     if pct_threshold is not None:
-#         for i in pct_threshold:
-#             t = np.percentile(adata.obs['total_counts'], i)
-#             thresholds.append(t)
-#         threshold_labels.extend(pct_threshold)
-
-#     print(thresholds)
-#     for t, tl in zip(thresholds, threshold_labels):
-#         proportion = np.sum(adata.obs['total_counts'] < t) / adata.n_obs
-#         ax.axvline(x=t, ymin=0, ymax=proportion, color='red', linewidth=.5, linestyle='--')
-#         ax.text(t, 0, f"{t:.0f}\n({i}%)" if tl is not None else f"{t:.0f}", color='red', ha='right', rotation=45, va='bottom')
-#         x_range = ax.get_xlim()
-#         xmax_axes = (t - x_range[0]) / (x_range[1] - x_range[0])
-#         ax.axhline(y=proportion, xmin=0, xmax=xmax_axes, color='red', linewidth=.5, linestyle='--')
-#         ax.text(0, proportion, f"{proportion:.2f}", color='red', ha='left', va='bottom')
-
-#     if show:
-#         plt.show()
-#     return fig, ax
-
 
 def plot_total_counts(adata, 
                       cnt_threshold: list[float,int]=None, 
@@ -539,12 +503,6 @@ def visualize_cell_coordinates_on_image(
         # Draw cell centroid as a circle
         # logger.info(vis_img.shape, int(x), int(y))
         cv2.circle(vis_img, (int(x), int(y)), centroid_radius, color, -1)  # -1 means filled circle
-        
-        # Optional: Draw cell ID as text
-        # cv2.putText(overlay, cell_id, (int(x)+10, int(y)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-    
-    # # Blend the overlay with the original image
-    # vis_img = cv2.addWeighted(vis_img, 1.0, overlay, alpha, 0)
     
     # Convert back to uint8 for saving
     if output_path is not None:
@@ -585,10 +543,6 @@ def create_cell_images(cell_img, cell_mask, local_cell_poly, cell_boundary_color
     unmasked_img = np.concatenate([cell_img.copy(), 
                                    cell_mask.reshape((cell_mask.shape[0], cell_mask.shape[1], 1)), 
                                    nucleus_mask.reshape((nucleus_mask.shape[0], nucleus_mask.shape[1], 1))], axis=2)
-
-    # logger.info(f"np.unique(cell_img): {np.unique(cell_img)}")
-    # logger.info(f"np.unique(masked_cell): {np.unique(masked_cell)}")
-    # logger.info(f"np.unique(boundary_cell): {np.unique(boundary_cell)}")
     
     return {
         'unmasked': unmasked_img,
@@ -748,11 +702,9 @@ def load_xenium_data_with_polygons_single_thread(
             img = np.concatenate(imgs, axis=2)
     elif type(img) is str:
         img = tifffile.imread(img)
-    # logger.info(f"[load_xenium_data_with_polygons_single_thread; before normalize] img.dtype={img.dtype}, img.max()={img.max()}")
 
     # convert to 0-255
     img = normalize_image(img, convert_to_uint8=True)
-    # logger.info(f"[load_xenium_data_with_polygons_single_thread; after normalize] img.dtype={img.dtype}, img.max()={img.max()}")
 
     height, width, _ = img.shape
     
@@ -802,9 +754,6 @@ def load_xenium_data_with_polygons_single_thread(
     window_cell_dict = {}
 
     adata.obs['window_id'] = pd.NA
-    # adata.uns['cell_images'] = {}
-    # adata.uns['he_patches'] = []
-    # adata.obsm['cell_boundaries'] = {}
 
     cell_images = {}
     patch_images = []
@@ -1328,24 +1277,6 @@ def load_xenium_data_with_polygons_parallel(
             all_cell_images.update(cell_images_result)
             all_patch_images.update(patch_images_result)
 
-    # # Update AnnData with window information
-    # patch_to_cells = {window_id: [] for window_id in patch_cell_mapping.keys()}
-    # for patch_id, cell_ids in patch_cell_mapping.items():
-    #     for cell_id in cell_ids:
-    #         patch_to_cells[patch_id].append(cell_id)
-
-    # # Create a mapping from cell_id to window_id
-    # cell_to_window = {}
-    # for patch_id, cell_ids in patch_to_cells.items():
-    #     for cell_id in cell_ids:
-    #         cell_to_window[cell_id] = patch_id
-
-    # # Update adata.obs with window_id
-    # adata.obs['patch_id'] = pd.NA
-    # for cell_id, patch_id in cell_to_window.items():
-    #     if cell_id in adata.obs_names:
-    #         adata.obs.loc[cell_id, 'patch_id'] = patch_id
-
     return adata, all_cell_images, all_patch_images, patch_cell_mapping
 
 
@@ -1494,7 +1425,6 @@ def main():
         plot_extracted_images(cell_images, patch_images, output_dir=f"{args.output_dir}/input")
 
     return
-
 
 if __name__ == '__main__':
     main()

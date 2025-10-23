@@ -99,12 +99,6 @@ if __name__ == "__main__":
         logger.info(f"Processing multiple samples: {args.sample_id}")
         num_cpus = 4
         jobs = []
-        # with multiprocessing.Pool(processes=num_cpus) as pool:
-        #     pool.starmap(
-        #         add_coordinates_to_existing_metadata,
-        #         [(args.data_dir, sid, args.output_dir, args.patch_size, args.stride) 
-        #          for sid in args.sample_id]
-        #     )
 
         # use apply async to have more control and logging
         pool = multiprocessing.Pool(processes=num_cpus)

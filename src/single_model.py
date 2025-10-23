@@ -15,10 +15,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ======================================
-# RNA Encoder
-# ======================================
-
 # Helper Residual Block for the encoder
 class ResidualBlock(nn.Module):
     """Residual block with normalization and dropout"""
@@ -208,11 +204,6 @@ class RNAEncoder(nn.Module):
             return F.softmax(self.gene_attention, dim=0)
         else:
             return torch.ones(self.input_dim) / self.input_dim  # Uniform importance if no attention
-
-
-# ======================================
-# RNA to H&E Cell Image Model
-# ======================================
 
 class RNAtoHnEModel(nn.Module):
     """

@@ -144,15 +144,6 @@ def reformat_to_separate_patches(combined_dir, output_dir, sample_id=None, compr
                 'cells': cells_in_patch
             })
         
-        # Save sample metadata
-        # sample_metadata = {
-        #     'sample_id': sample_id,
-        #     'n_patches': len(patch_metadata),
-        #     'patch_shape': patch_shape,
-        #     'gene_names': gene_names,
-        #     'n_genes': len(gene_names),
-        #     'total_cells': len(cell_expr_df)
-        # }
         sample_metadata = convert_numpy_types({
             'sample_id': sample_id,
             'n_patches': len(patch_metadata),

@@ -7,18 +7,7 @@ import torch.nn.functional as F
 from torchvision.models import resnet50
 from einops import rearrange
 import safetensors.torch
-
-# sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-# project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-# sequoia_root = os.path.join(project_root, 'sequoia')
-# sys.path.insert(0, sequoia_root)
-# try:
-#     from sequoia.src.he2rna import HE2RNA
-# finally:
-#     if sys.path[0] == sequoia_root:
-#         sys.path.pop(0)
 from sequoia.src.he2rna import HE2RNA
-
 
 logger = logging.getLogger(__name__)
 

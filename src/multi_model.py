@@ -32,11 +32,6 @@ class ResidualBlock(nn.Module):
     def forward(self, x):
         return self.main_branch(x) + self.skip(x)
 
-
-# ======================================
-# RNA Encoder with Cell Aggregation
-# ======================================
-
 class MultiCellRNAEncoder(nn.Module):
     """
     Enhanced encoder for multiple cells' RNA expression data with:
@@ -80,7 +75,7 @@ class MultiCellRNAEncoder(nn.Module):
             self.gene_relation_factors_head = nn.Linear(256, 2 * input_dim * self.relation_rank)
 
         # Cell encoder layers with residual connections
-        # This encoder processes each cell's (potentially relation-enhanced and attention-weighted) gene expression.
+        # This encoder processes each cell's gene expression.
         cell_encoder_input_dim = input_dim
         if concat_mask:
             cell_encoder_input_dim = input_dim * 2 # If mask is concatenated to gene features
@@ -113,7 +108,7 @@ class MultiCellRNAEncoder(nn.Module):
                 nn.Linear(prev_dim, self.num_aggregation_heads)
             )
         
-        # Head-specific projections for cell aggregation (optional, can make it more powerful)
+        # Head-specific projections for cell aggregation
         # Each head processes the `prev_dim` cell embedding
         self.aggregation_head_projections = nn.ModuleList([
             nn.Sequential(
@@ -265,11 +260,6 @@ class MultiCellRNAEncoder(nn.Module):
         else:
             return torch.ones(self.input_dim, device=next(self.parameters()).device) / self.input_dim
 
-
-# ======================================
-# Multi-Cell RNA to H&E Image Model
-# ======================================
-
 class MultiCellRNAtoHnEModel(nn.Module):
     """
     Model for generating H&E patch images from multiple cells' RNA expression data
@@ -369,13 +359,6 @@ class MultiCellRNAtoHnEModel(nn.Module):
         # Get vector field from UNet model
         return self.unet(x, t, extra={"rna_embedding": rna_embedding})
 
-
-# ======================================
-# Utility to convert batch data (if needed, e.g. from rectified_main.py)
-# ======================================
-# The prepare_multicell_batch function from your original multi_model.py
-# seems fine for preparing data from the DataLoader.
-
 def prepare_multicell_batch(batch, device):
     """
     Prepare a batch from PatchImageGeneDataset for input to MultiCellRNAtoHnEModel
@@ -406,10 +389,6 @@ def prepare_multicell_batch(batch, device):
             gene_expr_tensor = padded_gene_expr
     else:
         gene_expr_tensor = gene_expr_tensor.to(device)
-
-    # Validate num_cells against the tensor's second dimension if it's a list/tensor of counts
-    # The `num_cells` from patch_collate_fn is torch.tensor(num_cells), which is good.
-    # It will be used by MultiCellRNAEncoder for masking during aggregation.
 
     return {
         'image': images,

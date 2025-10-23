@@ -18,7 +18,6 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-
 def setup_logging(rank):
     """Setup logging for DDP - only rank 0 logs to avoid spam"""
     if rank == 0:
@@ -204,9 +203,6 @@ def setup_parser(parser=None):
     if parser is None:
         parser = argparse.ArgumentParser(description="RNA to H&E image generation tool")
 
-    # ============================================================================
-    # Model Architecture Arguments
-    # ============================================================================
     arch_group = parser.add_argument_group('Model Architecture')
     arch_group.add_argument('--use_gene_attention', action='store_true', default=True, 
                            help='Use gene attention mechanism (single-cell only)')
@@ -239,9 +235,6 @@ def setup_parser(parser=None):
     arch_group.add_argument('--num_aggregation_heads', type=int, default=4, 
                            help='Number of heads for cell aggregation in MultiCellRNAEncoder (multi-cell only, default: 4)')
 
-    # ============================================================================
-    # Model Configuration Arguments
-    # ============================================================================
     model_group = parser.add_argument_group('Model Configuration')
     model_group.add_argument('--model_type', type=str, choices=['single', 'multi'], default='multi',
                             help='Type of model to use: single-cell or multi-cell')
@@ -256,12 +249,8 @@ def setup_parser(parser=None):
     model_group.add_argument('--seed', type=int, default=42, 
                             help='Random seed for reproducibility')
 
-    # ============================================================================
-    # Data Loading Arguments
-    # ============================================================================
     data_group = parser.add_argument_group('Data Loading')
     
-    # AnnData loading
     data_group.add_argument('--adata', type=str, default=None,
                            help='Path to the AnnData object')
     data_group.add_argument('--layer', type=str, default=None, 
@@ -313,9 +302,6 @@ def setup_parser(parser=None):
     data_group.add_argument('--num_dataloader_workers', type=int, default=4,
                            help='Number of workers for data loading')
     
-    # ============================================================================
-    # Output and Evaluation Arguments
-    # ============================================================================
     output_group = parser.add_argument_group('Output and Evaluation')
     output_group.add_argument('--output_dir', type=str, default='output',
                              help='Directory to save outputs')
@@ -324,9 +310,6 @@ def setup_parser(parser=None):
     output_group.add_argument('--cell_id_to_generate', type=str, default=None, nargs='*',
                              help='Cell IDs to generate images for. If not provided, all cells will be used')
     
-    # ============================================================================
-    # Inference and Analysis Arguments
-    # ============================================================================
     inference_group = parser.add_argument_group('Inference and Analysis')
     inference_group.add_argument('--only_inference', action='store_true', default=False,
                                 help='Only run inference')
@@ -340,9 +323,6 @@ def setup_parser(parser=None):
     inference_group.add_argument('--nsamples_test', type=int, default=-1,
                                 help='Number of batches to use for testing')
     
-    # ============================================================================
-    # Stain Normalization Arguments
-    # ============================================================================
     stain_group = parser.add_argument_group('Stain Normalization')
     stain_group.add_argument('--enable_stain_normalization', action='store_true',
                             help='Enable stain normalization of generated images to real images')
@@ -351,7 +331,6 @@ def setup_parser(parser=None):
                             help='Stain normalization method')
     
     return parser
-
 
 def parse_adata(args=None, 
                 adata=None,
@@ -389,8 +368,6 @@ def parse_adata(args=None,
             min_total_pct = args.min_total_pct
         if max_total_pct is None and args.max_total_pct is not None:
             max_total_pct = args.max_total_pct
-        # if use_full_gene_list is None:
-        #     use_full_gene_list = args.use_full_gene_list
         if gene_symbols is None:
             gene_symbols = args.gene_symbols
         if missing_gene_symbols is None:
@@ -465,9 +442,6 @@ def parse_adata(args=None,
         expr = pd.DataFrame(np.zeros((adata.n_obs, ngenes)), index=adata.obs_names, columns=gene_symbols)
         expr.update(adata.to_df())
         missing_gene_symbols = list(set(missing_gene_symbols) | (set(gene_symbols) - set(adata.var_names)))
-
-    # mask = pd.DataFrame(np.ones((adata.n_obs, ngenes)).astype(int), index=adata.obs_names, columns=genes)
-    # mask.loc[:, missing_gene_symbols] = 0
     
     return expr, missing_gene_symbols
     
@@ -553,7 +527,6 @@ def analyze_gene_importance(
                 # Backward pass
                 scalar_output.backward()
 
-            # --- Accumulate Gradients ---
             if rna_expr_batch.grad is not None:
                 # Sum absolute gradients across the batch dimension for this timestep
                 # Move to float64 before summing potentially large numbers
@@ -562,9 +535,6 @@ def analyze_gene_importance(
                 num_samples_processed += current_batch_size # Increment by samples in this timestep analysis
             else:
                 logger.warning(f"No gradient computed for rna_expr_batch at t={t_val.item()} in batch {batches_processed}")
-
-            # Detach noise and predicted velocity to free memory if not needed further
-            # v_pred = v_pred.detach() # Uncomment if memory becomes an issue
 
         # Detach the input batch after processing all timesteps for it
         rna_expr_batch = rna_expr_batch.detach()
@@ -776,4 +746,3 @@ def manage_checkpoints(checkpoint_dir, max_checkpoints, rank, suffix=""):
             logger.info(f"Removed old checkpoint: {os.path.basename(ckpt)}")
         except Exception as e:
             logger.warning(f"Failed to remove checkpoint {ckpt}: {e}")
-

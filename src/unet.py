@@ -14,10 +14,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ======================================
-# Model Architecture Components
-# ======================================
-
 def conv_nd(dims, *args, **kwargs):
     """Create a 1D, 2D, or 3D convolution module."""
     if dims == 1:
@@ -80,10 +76,6 @@ def checkpoint(func, inputs, params, flag):
         return torch.utils.checkpoint.checkpoint(func, *args)
     else:
         return func(*inputs)
-
-# ======================================
-# UNet Model Components
-# ======================================
 
 class TimestepBlock(nn.Module):
     """Any module where forward() takes timestep embeddings as a second argument."""
@@ -328,11 +320,6 @@ class QKVAttention(nn.Module):
             "bts,bcs->bct", weight, v.reshape(bs * self.n_heads, ch, length)
         )
         return a.reshape(bs, -1, length)
-
-
-# ======================================
-# UNet Model
-# ======================================
 
 class RNAConditionedUNet(nn.Module):
     """

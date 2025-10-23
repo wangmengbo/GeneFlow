@@ -24,10 +24,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ======================================
-# Dataset Implementation
-# ======================================
-
 class CellImageGeneDataset(Dataset):
     """Dataset for cell images and gene expression profiles, supporting in-memory images."""
 

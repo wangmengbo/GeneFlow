@@ -45,7 +45,7 @@ def main():
     parser.add_argument('--patience', type=int, default=5, help='Early stopping patience.')
     parser.add_argument('--use_ddp', action='store_true', help='Use Distributed Data Parallel training.')
     parser.add_argument('--prefix', type=str, default='geneflow', help='Prefix for wandb run name.')
-    parser.add_argument('--no_wandb', action='store_true', help='Disable wandb logging.')
+    parser.add_argument('--no_wandb', action='store_true', default=True, help='Disable wandb logging.')
     parser.add_argument('--wandb_id', type=str, default=None, help='Wandb run ID for resuming.')
     parser.add_argument('--log_interval_pct', type=float, default=1.0, help='Log progress every N percent of batches')
     parser.add_argument('--resume_from', type=str, default=None, help='Path to specific checkpoint to resume from.')
@@ -283,14 +283,6 @@ def main():
         dataset, [train_size, val_size], 
         generator=torch.Generator().manual_seed(args.seed)
     )
-
-    # if args.debug:
-    #     if rank == 0:
-    #         logger.info("DEBUG MODE: Adjusting training parameters")
-    #         logger.info(f"  - Epochs: {args.epochs} -> 2")
-    #         logger.info(f"  - Checkpoint freq: {args.checkpoint_freq} -> 1")
-    #     args.epochs = min(args.epochs, 2)  # Max 2 epochs in debug
-    #     args.checkpoint_freq = 1  # Save every epoch
 
     # Create distributed samplers
     if args.use_ddp:

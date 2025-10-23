@@ -17,11 +17,6 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-
-# ============================================================================
-# SEGMENTATION-BASED SPATIAL LOSS (Original Approach)
-# ============================================================================
-
 class CellSegmenter:
     """Cell segmentation using Cellpose"""
     def __init__(self, model_type='cyto2', device='cuda', diameter=None):
@@ -286,11 +281,6 @@ def compute_segmentation_spatial_loss(generated_images: torch.Tensor,
     avg_loss = total_loss / valid_samples
     return torch.tensor(avg_loss, device=device, dtype=torch.float32, requires_grad=False)
 
-
-# ============================================================================
-# SIMPLE SPATIAL LOSS (Gradient + Texture Based)
-# ============================================================================
-
 class SimpleSpatialLoss(nn.Module):
     """
     Fast spatial loss without segmentation
@@ -370,11 +360,6 @@ class SimpleSpatialLoss(nn.Module):
         total_loss += self.texture_weight * texture_loss
         
         return total_loss
-
-
-# ============================================================================
-# UNIFIED SPATIAL LOSS MODULE (Supports Both Methods)
-# ============================================================================
 
 class SpatialGraphLossModule:
     """

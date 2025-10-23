@@ -21,9 +21,6 @@ from torch.nn.functional import adaptive_avg_pool2d
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.single_model import RNAtoHnEModel
-# Note: If you have deprecated versions for diffusion models, import them similarly if needed for robust checkpoint loading.
-# from src.single_model_deprecation import RNAtoHnEModel as RNAtoHnEModel_deprecation 
-# from src.multi_model_deprecation import MultiCellRNAtoHnEModel as MultiCellRNAtoHnEModel_deprecation
 from baseline.diffusion import GaussianDiffusion
 from src.utils import setup_parser, parse_adata
 from src.multi_model import MultiCellRNAtoHnEModel, prepare_multicell_batch
@@ -68,7 +65,7 @@ class InceptionModel(torch.nn.Module):
         x = self.inception_model(x)
         return x
 
-# MODIFIED Calculate FID score (aligned with rectified_evaluate.py)
+# Calculate FID score
 def calculate_fid(real_features, gen_features):
     if real_features.shape[0] < 2 or gen_features.shape[0] < 2:
         return np.nan
@@ -93,7 +90,7 @@ def calculate_fid(real_features, gen_features):
     return fid if fid >= 0 and not np.isnan(fid) and not np.isinf(fid) else np.nan
 
 
-# Calculate SSIM and PSNR for a batch of images (aligned with rectified_evaluate.py)
+# Calculate SSIM and PSNR for a batch of images
 def calculate_image_metrics(real_images_batch, generated_images_batch):
     # Expects PyTorch Tensors (B, C, H, W) in range [0,1]
     batch_size = real_images_batch.shape[0]
@@ -242,7 +239,6 @@ def main():
 
     gene_dim = expr_df.shape[1]
     
-    # --- Model Loading with Config Consistency (simplified for diffusion, prioritize checkpoint img_channels) ---
     logger.info(f"Loading pretrained model from {args.model_path}")
     try:
         checkpoint = torch.load(args.model_path, map_location=device)
@@ -253,11 +249,7 @@ def main():
     model_state = checkpoint.get("model", checkpoint)
     model_config_ckpt = checkpoint.get("config", {})
 
-    # Prioritize config from checkpoint for critical architectural params like img_channels for stain norm
-    # For diffusion, model_type and img_size from args might be more directly tied to how diffusion was trained.
     args.img_channels = model_config_ckpt.get('img_channels', args.img_channels)
-    # args.img_size = model_config_ckpt.get('img_size', args.img_size) # Optional: decide if checkpoint should override this
-    # ckpt_model_type = model_config_ckpt.get('model_type', args.model_type) # Optional
 
     model_constructor_args = dict(
         rna_dim=gene_dim, 
@@ -290,7 +282,6 @@ def main():
     logger.info(f"Model loaded successfully using {args.model_type} constructor with img_channels={args.img_channels}.")
     model.to(device)
     model.eval()
-    # --- End Model Loading ---
     
     diffusion = GaussianDiffusion(
         timesteps=args.diffusion_timesteps,
@@ -339,7 +330,6 @@ def main():
                     num_steps=args.gen_steps, num_cells=num_cells_info, gene_mask=gene_mask, is_multi_cell=True, method=args.sampling_method
                 )
             
-            # <<< START STAIN NORMALIZATION MODIFICATION >>>
             if args.enable_stain_normalization and args.img_channels >= 3:
                 logger.debug(f"Applying stain normalization for batch {batch_idx} using method: {args.stain_normalization_method}")
                 normalized_generated_images_list = []
@@ -369,7 +359,6 @@ def main():
                         torch.from_numpy(final_gen_img_np_j.transpose(2,0,1)).to(device)
                     )
                 generated_images_tensor = torch.stack(normalized_generated_images_list) # B,C,H,W
-            # <<< END STAIN NORMALIZATION MODIFICATION >>>
 
             # Ensure images are in [0,1] before passing to Inception or metrics
             real_images_tensor = torch.clamp(real_images_tensor, 0, 1)
@@ -397,8 +386,6 @@ def main():
             
             if not np.isnan(fid_batch):
                 all_batch_fids_list.append(fid_batch)
-            # else:
-                # logger.debug(f"FID for batch {batch_idx} is NaN (batch size: {current_batch_size}).")
 
             for i in range(len(batch_ssim_scores)):
                 per_sample_metrics_list.append({
@@ -466,7 +453,7 @@ def main():
         per_sample_df.to_csv(csv_output_path, index=False)
         logger.info(f"Per-sample metrics saved to {csv_output_path}")
 
-    # Enhanced Plotting (aligned with rectified_evaluate.py)
+    # Plotting
     fig_height = 5
     num_plots = 0
     if all_ssim_scores: num_plots +=1
