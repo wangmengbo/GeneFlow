@@ -53,6 +53,9 @@ Preprocessing code for Xenium data in HEST-1k is provided in `utils/prepare_hest
 
 ## Training
 
+```bash
+bash train.sh
+```
 ---
 
 ## Evaluation
