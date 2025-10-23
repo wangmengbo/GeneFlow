@@ -46,8 +46,8 @@ python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA av
 ---
 
 ## Data Download and Preprocessing
-
-Preprocessing code for Xenium data in HEST-1k is provided in `utils/prepare_hestxenium_data.py`.
+1. Preprocessed demo Xenium samples can be downloaded at [C1](https://zenodo.org/uploads/17429425), [C2](https://zenodo.org/uploads/17429434).
+1. Preprocessing code for Xenium data in HEST-1k is provided in `utils/README.md` and `utils/prepare_hestxenium_data.py`.
 
 ---
 
@@ -68,10 +68,9 @@ For evaluation using biological features, install additional dependencies:
 - [Pretrained HE2RNA weights](https://huggingface.co/gevaertlab)
 
 ### Setup Instructions
-
 1. **Download pretrained HE2RNA weights** and place them in the `sequoia/models/` directory.
 
-2. **Modify `sequoia/src/he2rna.py`** by replacing the import statements:
+1. **Modify `sequoia/src/he2rna.py`** by replacing the import statements:
 
 ```python
 # Replace these lines:
