@@ -1,8 +1,9 @@
-# GeneFlow: Translation of Single-cell Gene Expression to Histopathological Images via Rectified Flow
+# GeneFlow
 ![cover](misc/genecover.png "Cover")
 
 ## Overview
 ![overview](misc/geneflow-cr.png "GeneFlow Overview")
+This is the repo for the NeurIPS 2025 paper, [GeneFlow: Translation of Single-cell Gene Expression to Histopathological Images via Rectified Flow](https://neurips.cc/virtual/2025/poster/114997).
 
 ## Requirement
 Please refer to the `requirements.txt` file for the list of required packages and their versions. Dependices can be installed using pip:
@@ -10,26 +11,9 @@ Please refer to the `requirements.txt` file for the list of required packages an
 pip install -r requirements.txt
 ```
 
-For evaluation with biological features, please install the additional dependencies, UNI2 and HE2RNA.
-
 ## Usage
 Preprocessed data of three demo 10x Xenium samples can be found 
-To run the GeneFlow model, use the following command:
-<!-- ```bash
-tar -czf processed_data.tar.gz \
-  --transform='s,^depot/natallah/data/Mengbo/HnE_RNA/GeneFlow/,,' \
-  -C /depot/natallah/data/Mengbo/HnE_RNA/GeneFlow \
-  processed_data/Xenium_Prime_Human_Skin_FFPE/cell_patch_256_aux/input \
-  processed_data/Xenium_Prime_Human_Skin_FFPE/adata.h5ad \
-  processed_data/Xenium_Prime_Human_Skin_FFPE/adata_unfiltered.h5ad \
-  processed_data/Xenium_V1_hSkin_Melanoma_Base_FFPE/cell_patch_256_aux/input \
-  processed_data/Xenium_V1_hSkin_Melanoma_Base_FFPE/adata.h5ad \
-  processed_data/Xenium_V1_hSkin_Melanoma_Base_FFPE/adata_unfiltered.h5ad \
-  processed_data/Xeniumranger_V1_hSkin_Melanoma_Add_on_FFPE/cell_patch_256_aux/input \
-  processed_data/Xeniumranger_V1_hSkin_Melanoma_Add_on_FFPE/adata.h5ad \
-  processed_data/Xeniumranger_V1_hSkin_Melanoma_Add_on_FFPE/adata_unfiltered.h5ad
-``` -->
-
+To run the GeneFlow model, use the following commands:
 ```bash
 python rectified/rectified_main.py \
 	--model_type single \
@@ -57,6 +41,26 @@ python rectified/rectified_main.py \
 
 Proprocessing code for Xenium data in HEST-1k can be found in `utils/prepare_hestxenium_data.py`.
 
-## Citation
-If you find this code useful for your research, please cite the following paper:
+For evaluation with biological features, please install the additional dependencies, including [Sequoia](https://github.com/gevaertlab/sequoia-pub), [UNI2](https://huggingface.co/MahmoodLab/UNI2-h) and [pretrained HE2RNA weights](https://huggingface.co/gevaertlab). Please download the pretrained HE2RNA weights and place them in the `sequoia/models/` directory. Replce these lines in `sequoia/src/he2rna.py` with provided code:
+```python
+# from src.read_data import SuperTileRNADataset
+# from src.utils import patient_split, patient_kfold, custom_collate_fn, filter_no_features
+from .read_data import SuperTileRNADataset
+from .utils import patient_split, patient_kfold, custom_collate_fn, filter_no_features
+```
 
+
+<!-- ## Citation
+If you find this code useful for your research, please cite the following paper: -->
+
+## License
+Shield: [![CC BY-NC-ND 4.0][cc-by-nc-nd-shield]][cc-by-nc-nd]
+
+This work is licensed under a
+[Creative Commons Attribution-NonCommercial-NoDerivs 4.0 International License][cc-by-nc-nd].
+
+[![CC BY-NC-ND 4.0][cc-by-nc-nd-image]][cc-by-nc-nd]
+
+[cc-by-nc-nd]: http://creativecommons.org/licenses/by-nc-nd/4.0/
+[cc-by-nc-nd-image]: https://licensebuttons.net/l/by-nc-nd/4.0/88x31.png
+[cc-by-nc-nd-shield]: https://img.shields.io/badge/License-CC%20BY--NC--ND%204.0-lightgrey.svg
