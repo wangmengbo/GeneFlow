@@ -87,13 +87,13 @@ We provide two preprocessed Xenium samples for demonstration:
 **Sample C1:**
 ```bash
 wget -O xenium_c1.tar.gz "https://zenodo.org/records/17429425/files/xenium_c1.tar.gz?download=1"
-tar -xzf xenium_c1.tar.gz -C /path/to/GeneFlow/processed/data/
+tar -xzf xenium_c1.tar.gz -C /path/to/GeneFlow/processed_data/
 ```
 
 **Sample C2:**
 ```bash
 wget -O xenium_c2.tar.gz "https://zenodo.org/records/17429434/files/xenium_c2.tar.gz?download=1"
-tar -xzf xenium_c2.tar.gz -C /path/to/GeneFlow/processed/data/
+tar -xzf xenium_c2.tar.gz -C /path/to/GeneFlow/processed_data/
 ```
 
 ### Data Preprocessing
@@ -103,7 +103,7 @@ For preprocessing custom Xenium data from HEST-1k:
 ```bash
 python utils/prepare_hestxenium_data.py \
     --input_dir /path/to/GeneFlow/raw/data \
-    --output_dir /path/to/GeneFlow/processed/data \
+    --output_dir /path/to/GeneFlow/processed_data/ \
     --img_size 256 \
     --img_channels 4
 ```
@@ -111,8 +111,6 @@ python utils/prepare_hestxenium_data.py \
 ---
 
 ## Training
-
-### Quick Start
 
 Run training with default parameters:
 
@@ -127,8 +125,8 @@ Modify `train.sh` or run directly with custom arguments:
 ```bash
 python rectified/rectified_main.py \
     --model_type single \
-    --adata /path/to/GeneFlow/processed/data/adata.h5ad \
-    --image_paths /path/to/GeneFlow/processed/data/cell_image_paths.json \
+    --adata /path/to/GeneFlow/processed_data/adata.h5ad \
+    --image_paths /path/to/GeneFlow/processed_data/cell_image_paths.json \
     --img_size 256 \
     --img_channels 4 \
     --output_dir /path/to/GeneFlow/results \
@@ -147,8 +145,8 @@ For multi-GPU training:
 torchrun --nproc_per_node=8 rectified/rectified_main.py \
     --use_ddp \
     --model_type single \
-    --adata /path/to/GeneFlow/processed/data/adata.h5ad \
-    --image_paths /path/to/GeneFlow/processed/data/cell_image_paths.json \
+    --adata /path/to/GeneFlow/processed_data/adata.h5ad \
+    --image_paths /path/to/GeneFlow/processed_data/cell_image_paths.json \
     --img_size 256 \
     --img_channels 4 \
     --output_dir /path/to/GeneFlow/results \
@@ -162,50 +160,8 @@ torchrun --nproc_per_node=8 rectified/rectified_main.py \
 
 Generate images from gene expression using a pretrained model.
 
-### Quick Start
-
 ```bash
 bash generate.sh
-```
-
-### Custom Generation
-
-```bash
-python rectified/rectified_generate.py \
-    --model_path /path/to/GeneFlow/checkpoints/best_checkpoint.pt \
-    --model_type single \
-    --adata /path/to/GeneFlow/adata.h5ad \
-    --image_paths /path/to/GeneFlow/cell_image_paths.json \
-    --img_size 256 \
-    --img_channels 4 \
-    --output_dir /path/to/GeneFlow/generated_results \
-    --batch_size 8 \
-    --num_samples 100 \
-    --gen_steps 50
-```
-
-### Generation Parameters
-
-- `model_path`: Path to trained model checkpoint
-- `num_samples`: Number of samples to generate (default: 10)
-- `gen_steps`: ODE solver steps (default: 50, range: 20-100)
-  - Higher values: better quality, slower generation
-  - Lower values: faster generation, potentially lower quality
-- `batch_size`: Batch size for generation
-
-### Optional Stain Normalization
-
-Apply stain normalization to match real image statistics:
-
-```bash
-python rectified/rectified_generate.py \
-    --model_path /path/to/GeneFlow/best_checkpoint.pt \
-    --model_type single \
-    --adata /path/to/GeneFlow/adata.h5ad \
-    --output_dir /path/to/GeneFlow/results \
-    --num_samples 100 \
-    --enable_stain_normalization \
-    --stain_normalization_method skimage_hist_match
 ```
 
 ### Output Files
@@ -222,8 +178,6 @@ Generation produces:
 ---
 
 ## Evaluation
-
-### Quick Start
 
 Run evaluation on trained model:
 
