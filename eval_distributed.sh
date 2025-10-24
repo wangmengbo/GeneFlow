@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# GeneFlow Image Generation Script
-# Generate synthetic histopathological images from gene expression
+# GeneFlow Distributed Evaluation Script (Multi-GPU)
+# Requires multiple GPUs and torchrun
 
 # Model path
 MODEL_PATH="/GeneFlow/results/checkpoints/best_model.pt"
@@ -9,24 +9,24 @@ MODEL_PATH="/GeneFlow/results/checkpoints/best_model.pt"
 # Data paths
 ADATA="/GeneFlow/processed_data/Xenium_V1_hSkin_Melanoma_Base_FFPE/adata.h5ad"
 IMAGE_PATHS="/GeneFlow/processed_data/Xenium_V1_hSkin_Melanoma_Base_FFPE/cell_patch_256_aux/input/cell_image_paths.json"
-OUTPUT_DIR="/GeneFlow/generated_results"
+OUTPUT_DIR="/GeneFlow/evaluation_results"
 
 # Model configuration
 MODEL_TYPE="single"
 IMG_SIZE=256
 IMG_CHANNELS=4
 
-# Generation parameters
-BATCH_SIZE=8
-NUM_SAMPLES=100
+# Evaluation parameters
+BATCH_SIZE=8  # Per-GPU batch size
 GEN_STEPS=50
 
-# Stain normalization (optional)
-ENABLE_STAIN_NORM=""          # Add --enable_stain_normalization to enable
-STAIN_NORM_METHOD="skimage_hist_match"  # Method for stain normalization
+# Multi-GPU configuration
+NUM_GPUS=8  # Number of GPUs to use
 
-# Run generation
-python rectified/rectified_generate.py \
+# Run distributed evaluation
+torchrun --nproc_per_node=${NUM_GPUS} rectified/rectified_evaluate.py \
+    --use_ddp \
+    --use_amp \
     --model_path ${MODEL_PATH} \
     --model_type ${MODEL_TYPE} \
     --adata ${ADATA} \
@@ -35,6 +35,4 @@ python rectified/rectified_generate.py \
     --img_channels ${IMG_CHANNELS} \
     --output_dir ${OUTPUT_DIR} \
     --batch_size ${BATCH_SIZE} \
-    --num_samples ${NUM_SAMPLES} \
-    --gen_steps ${GEN_STEPS} \
-    ${ENABLE_STAIN_NORM}
+    --gen_steps ${GEN_STEPS}

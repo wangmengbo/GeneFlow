@@ -142,8 +142,15 @@ python rectified/rectified_main.py \
 For multi-GPU training:
 
 ```bash
+bash train_distributed.sh
+```
+
+Or run directly:
+
+```bash
 torchrun --nproc_per_node=8 rectified/rectified_main.py \
     --use_ddp \
+    --use_amp \
     --model_type single \
     --adata /path/to/GeneFlow/processed_data/adata.h5ad \
     --image_paths /path/to/GeneFlow/processed_data/cell_image_paths.json \
@@ -158,36 +165,122 @@ torchrun --nproc_per_node=8 rectified/rectified_main.py \
 
 ## Generation
 
-Generate images from gene expression using a pretrained model.
+Generate synthetic histopathological images from gene expression using a pretrained model:
 
 ```bash
 bash generate.sh
 ```
 
-### Output Files
+### Custom Generation
+
+Modify `generate.sh` or run directly with custom arguments:
+
+```bash
+python rectified/rectified_generate.py \
+    --model_path /path/to/GeneFlow/results/checkpoints/best_model.pt \
+    --model_type single \
+    --adata /path/to/GeneFlow/processed_data/adata.h5ad \
+    --image_paths /path/to/GeneFlow/processed_data/cell_image_paths.json \
+    --img_size 256 \
+    --img_channels 4 \
+    --output_dir /path/to/GeneFlow/generated_results \
+    --batch_size 8 \
+    --num_samples 100 \
+    --gen_steps 50
+```
+
+### Generation Parameters
+
+- `--model_path`: Path to pretrained model checkpoint
+- `--num_samples`: Number of samples to generate
+- `--gen_steps`: Number of generation steps for rectified flow (default: 50)
+- `--enable_stain_normalization`: Apply stain normalization to generated images
+- `--stain_normalization_method`: Method for stain normalization (default: skimage_hist_match)
+
+### Output
 
 Generation produces:
-- `generation_results.pdf`: Multi-page PDF with all generated samples (20 samples per page)
-- `generation_results.png`: Quick preview with first 10 samples
-- `generated_images/`: Individual PNG files for each sample
-  - `{sample_id}_real_rgb.png`: Real RGB image
-  - `{sample_id}_gen_rgb.png`: Generated RGB image
-  - `{sample_id}_real_ch{N}.png`: Real auxiliary channels (if applicable)
-  - `{sample_id}_gen_ch{N}.png`: Generated auxiliary channels (if applicable)
+- Individual PNG images for each sample (RGB and auxiliary channels)
+- Multi-page PDF with all samples (`generation_results.pdf`)
+- Preview PNG with first 10 samples (`generation_results.png`)
 
 ---
 
 ## Evaluation
 
-Run evaluation on trained model:
+Run comprehensive evaluation on trained model:
 
 ```bash
 bash eval.sh
 ```
 
+### Custom Evaluation
+
+Modify `eval.sh` or run directly with custom arguments:
+
+```bash
+python rectified/rectified_evaluate.py \
+    --model_path /path/to/GeneFlow/results/checkpoints/best_model.pt \
+    --model_type single \
+    --adata /path/to/GeneFlow/processed_data/adata.h5ad \
+    --image_paths /path/to/GeneFlow/processed_data/cell_image_paths.json \
+    --img_size 256 \
+    --img_channels 4 \
+    --output_dir /path/to/GeneFlow/evaluation_results \
+    --batch_size 8 \
+    --gen_steps 50 \
+    --use_amp
+```
+
+### Distributed Evaluation
+
+For multi-GPU evaluation:
+
+```bash
+bash eval_distributed.sh
+```
+
+Or run directly:
+
+```bash
+torchrun --nproc_per_node=8 rectified/rectified_evaluate.py \
+    --use_ddp \
+    --use_amp \
+    --model_path /path/to/GeneFlow/results/checkpoints/best_model.pt \
+    --model_type single \
+    --adata /path/to/GeneFlow/processed_data/adata.h5ad \
+    --image_paths /path/to/GeneFlow/processed_data/cell_image_paths.json \
+    --img_size 256 \
+    --img_channels 4 \
+    --output_dir /path/to/GeneFlow/evaluation_results \
+    --batch_size 8 \
+    --gen_steps 50
+```
+
+### Evaluation Metrics
+
+GeneFlow evaluation includes:
+
+**Image Quality Metrics:**
+- SSIM (Structural Similarity Index)
+- PSNR (Peak Signal-to-Noise Ratio)
+- FID (Fréchet Inception Distance)
+
+**Biological Validation Metrics:**
+- UNI2-h FID (using histopathology foundation model)
+- Cell type classification accuracy
+- Nuclear feature similarity
+- Spatial pattern similarity
+- UNI2-h embedding similarity
+
+**RNA Prediction Metrics (Round-trip validation):**
+- Gene-wise correlation
+- Sample-wise correlation
+- RNA MSE
+
 ### Biological Feature Evaluation
 
-For comprehensive evaluation using biological features:
+For comprehensive evaluation using biological features, install the required models:
 
 #### Required Tools
 
@@ -219,13 +312,30 @@ from .read_data import SuperTileRNADataset
 from .utils import patient_split, patient_kfold, custom_collate_fn, filter_no_features
 ```
 
-3. **Run evaluation:**
+3. **Run evaluation with biological models:**
 ```bash
-python eval/evaluate_biological_features.py \
-    --generated_images /path/to/GeneFlow/generated_images \
-    --real_images /path/to/GeneFlow/real_images \
-    --output_dir /path/to/GeneFlow/eval_results
+python rectified/rectified_evaluate.py \
+    --model_path /path/to/GeneFlow/results/checkpoints/best_model.pt \
+    --model_type single \
+    --adata /path/to/GeneFlow/processed_data/adata.h5ad \
+    --image_paths /path/to/GeneFlow/processed_data/cell_image_paths.json \
+    --output_dir /path/to/GeneFlow/evaluation_results \
+    --uni2h_model_path /path/to/uni2h_model \
+    --he2rna_weights /path/to/he2rna_weights.pt \
+    --save_embeddings \
+    --embeddings_output_path /path/to/embeddings
 ```
+
+### Output
+
+Evaluation produces:
+- `evaluation_summary.json`: Overall metrics summary
+- `per_sample_metrics.csv`: Per-sample detailed metrics
+- `batch_level_biological_validation.csv`: Batch-level biological metrics
+- Visualization plots for all metrics
+- UNI2-h embeddings (if `--save_embeddings` is enabled)
+
+---
 
 ## Citation
 
