@@ -13,6 +13,22 @@ Official implementation of **GeneFlow: Translation of Single-cell Gene Expressio
 
 ---
 
+## Table of Contents
+
+- [News](#news)
+- [Overview](#overview)
+- [Installation](#installation)
+- [Data](#data)
+- [Training](#training)
+- [Generation](#generation)
+- [Evaluation](#evaluation)
+- [Model Architecture](#model-architecture)
+- [Citation](#citation)
+- [License](#license)
+- [Contact](#contact)
+
+---
+
 ## News
 
 - **October 2025**: Initial release of GeneFlow codebase
@@ -71,13 +87,13 @@ We provide two preprocessed Xenium samples for demonstration:
 **Sample C1:**
 ```bash
 wget -O xenium_c1.tar.gz "https://zenodo.org/records/17429425/files/xenium_c1.tar.gz?download=1"
-tar -xzf xenium_c1.tar.gz -C /path/to/GeneFlow/data/
+tar -xzf xenium_c1.tar.gz -C /path/to/GeneFlow/processed/data/
 ```
 
 **Sample C2:**
 ```bash
 wget -O xenium_c2.tar.gz "https://zenodo.org/records/17429434/files/xenium_c2.tar.gz?download=1"
-tar -xzf xenium_c2.tar.gz -C /path/to/GeneFlow/data/
+tar -xzf xenium_c2.tar.gz -C /path/to/GeneFlow/processed/data/
 ```
 
 ### Data Preprocessing
@@ -86,13 +102,11 @@ For preprocessing custom Xenium data from HEST-1k:
 
 ```bash
 python utils/prepare_hestxenium_data.py \
-    --input_dir /path/to/raw/data \
-    --output_dir /path/to/processed/data \
+    --input_dir /path/to/GeneFlow/raw/data \
+    --output_dir /path/to/GeneFlow/processed/data \
     --img_size 256 \
     --img_channels 4
 ```
-
-See `utils/README.md` for detailed preprocessing instructions.
 
 ---
 
@@ -113,11 +127,11 @@ Modify `train.sh` or run directly with custom arguments:
 ```bash
 python rectified/rectified_main.py \
     --model_type single \
-    --adata /path/to/adata.h5ad \
-    --image_paths /path/to/cell_image_paths.json \
+    --adata /path/to/GeneFlow/processed/data/adata.h5ad \
+    --image_paths /path/to/GeneFlow/processed/data/cell_image_paths.json \
     --img_size 256 \
     --img_channels 4 \
-    --output_dir /path/to/results \
+    --output_dir /path/to/GeneFlow/results \
     --batch_size 16 \
     --epochs 50 \
     --patience 5 \
@@ -133,14 +147,77 @@ For multi-GPU training:
 torchrun --nproc_per_node=8 rectified/rectified_main.py \
     --use_ddp \
     --model_type single \
-    --adata /path/to/adata.h5ad \
-    --image_paths /path/to/cell_image_paths.json \
+    --adata /path/to/GeneFlow/processed/data/adata.h5ad \
+    --image_paths /path/to/GeneFlow/processed/data/cell_image_paths.json \
     --img_size 256 \
     --img_channels 4 \
-    --output_dir /path/to/results \
+    --output_dir /path/to/GeneFlow/results \
     --batch_size 16 \
     --epochs 50
 ```
+
+---
+
+## Generation
+
+Generate images from gene expression using a pretrained model.
+
+### Quick Start
+
+```bash
+bash generate.sh
+```
+
+### Custom Generation
+
+```bash
+python rectified/rectified_generate.py \
+    --model_path /path/to/GeneFlow/checkpoints/best_checkpoint.pt \
+    --model_type single \
+    --adata /path/to/GeneFlow/adata.h5ad \
+    --image_paths /path/to/GeneFlow/cell_image_paths.json \
+    --img_size 256 \
+    --img_channels 4 \
+    --output_dir /path/to/GeneFlow/generated_results \
+    --batch_size 8 \
+    --num_samples 100 \
+    --gen_steps 50
+```
+
+### Generation Parameters
+
+- `model_path`: Path to trained model checkpoint
+- `num_samples`: Number of samples to generate (default: 10)
+- `gen_steps`: ODE solver steps (default: 50, range: 20-100)
+  - Higher values: better quality, slower generation
+  - Lower values: faster generation, potentially lower quality
+- `batch_size`: Batch size for generation
+
+### Optional Stain Normalization
+
+Apply stain normalization to match real image statistics:
+
+```bash
+python rectified/rectified_generate.py \
+    --model_path /path/to/GeneFlow/best_checkpoint.pt \
+    --model_type single \
+    --adata /path/to/GeneFlow/adata.h5ad \
+    --output_dir /path/to/GeneFlow/results \
+    --num_samples 100 \
+    --enable_stain_normalization \
+    --stain_normalization_method skimage_hist_match
+```
+
+### Output Files
+
+Generation produces:
+- `generation_results.pdf`: Multi-page PDF with all generated samples (20 samples per page)
+- `generation_results.png`: Quick preview with first 10 samples
+- `generated_images/`: Individual PNG files for each sample
+  - `{sample_id}_real_rgb.png`: Real RGB image
+  - `{sample_id}_gen_rgb.png`: Generated RGB image
+  - `{sample_id}_real_ch{N}.png`: Real auxiliary channels (if applicable)
+  - `{sample_id}_gen_ch{N}.png`: Generated auxiliary channels (if applicable)
 
 ---
 
@@ -191,29 +268,10 @@ from .utils import patient_split, patient_kfold, custom_collate_fn, filter_no_fe
 3. **Run evaluation:**
 ```bash
 python eval/evaluate_biological_features.py \
-    --generated_images /path/to/generated_images \
-    --real_images /path/to/real_images \
-    --output_dir /path/to/eval_results
+    --generated_images /path/to/GeneFlow/generated_images \
+    --real_images /path/to/GeneFlow/real_images \
+    --output_dir /path/to/GeneFlow/eval_results
 ```
-
----
-
-## Model Architecture
-
-GeneFlow employs a rectified flow framework to map gene expression profiles to histopathological images:
-
-- **Input**: Single-cell or multi-cell gene expression vectors
-- **Encoder**: Transformer-based architecture for processing gene expression
-- **Flow Model**: Rectified flow for continuous mapping between distributions
-- **Output**: Synthetic histopathological images (RGB + auxiliary channels)
-
-Key features:
-- Supports single-cell and multi-cell (patch-level) generation
-- Configurable number of image channels (RGB + auxiliary)
-- Optional spatial graph loss for multi-cell coherence
-- Mixed precision training with automatic mixed precision (AMP)
-
----
 
 ## Citation
 
