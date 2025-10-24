@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# GeneFlow Training Script
-# Modify paths and parameters according to your data and requirements
+# GeneFlow Distributed Training Script (Multi-GPU)
+# Requires multiple GPUs and torchrun
 
 # Data paths
 ADATA="/GeneFlow/processed_data/Xenium_V1_hSkin_Melanoma_Base_FFPE/adata.h5ad"
@@ -9,23 +9,24 @@ IMAGE_PATHS="/GeneFlow/processed_data/Xenium_V1_hSkin_Melanoma_Base_FFPE/cell_pa
 OUTPUT_DIR="/GeneFlow/results"
 
 # Model configuration
-MODEL_TYPE="single"  # Options: single, multi
+MODEL_TYPE="single"
 IMG_SIZE=256
 IMG_CHANNELS=4
 
 # Training parameters
-BATCH_SIZE=16
+BATCH_SIZE=16  # Per-GPU batch size
 EPOCHS=50
 LEARNING_RATE=1e-4
 WEIGHT_DECAY=0.01
 PATIENCE=5
 
-# Advanced options
-USE_AMP=""  # Add --use_amp to enable automatic mixed precision
-USE_DDP=""  # Add --use_ddp to enable distributed data parallel training
+# Multi-GPU configuration
+NUM_GPUS=8  # Number of GPUs to use
 
-# Run training
-python rectified/rectified_main.py \
+# Run distributed training
+torchrun --nproc_per_node=${NUM_GPUS} rectified/rectified_main.py \
+    --use_ddp \
+    --use_amp \
     --model_type ${MODEL_TYPE} \
     --adata ${ADATA} \
     --image_paths ${IMAGE_PATHS} \
@@ -36,6 +37,4 @@ python rectified/rectified_main.py \
     --epochs ${EPOCHS} \
     --lr ${LEARNING_RATE} \
     --weight_decay ${WEIGHT_DECAY} \
-    --patience ${PATIENCE} \
-    ${USE_AMP} \
-    ${USE_DDP}
+    --patience ${PATIENCE}
