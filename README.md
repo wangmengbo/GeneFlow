@@ -82,18 +82,24 @@ python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA av
 
 ### Download Preprocessed Demo Data
 
-We provide two preprocessed Xenium samples for demonstration:
+We provide three preprocessed Xenium samples for demonstration, which can be downloaded from https://zenodo.org/records/17429142:
 
 **Sample C1:**
 ```bash
-wget -O xenium_c1.tar.gz "https://zenodo.org/records/17429425/files/xenium_c1.tar.gz?download=1"
+wget -O xenium_c1.tar.gz "https://zenodo.org/records/17429142/files/Xenium_V1_hSkin_Melanoma_Base_FFPE.tar.gz?download=1"
 tar -xzf xenium_c1.tar.gz -C /path/to/GeneFlow/processed_data/
 ```
 
 **Sample C2:**
 ```bash
-wget -O xenium_c2.tar.gz "https://zenodo.org/records/17429434/files/xenium_c2.tar.gz?download=1"
+wget -O xenium_c2.tar.gz "https://zenodo.org/records/17429142/files/Xeniumranger_V1_hSkin_Melanoma_Add_on_FFPE.tar.gz?download=1"
 tar -xzf xenium_c2.tar.gz -C /path/to/GeneFlow/processed_data/
+```
+
+**Sample P1:**
+```bash
+wget -O xenium_p1.tar.gz "https://zenodo.org/records/17429142/files/Xenium_Prime_Human_Skin_FFPE.tar.gz?download=1"
+tar -xzf xenium_p1.tar.gz -C /path/to/GeneFlow/processed_data/
 ```
 
 ### Data Preprocessing
