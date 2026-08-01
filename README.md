@@ -1,21 +1,38 @@
 # GeneFlow
 
 [![License: CC BY-NC-ND 4.0](https://img.shields.io/badge/License-CC%20BY--NC--ND%204.0-lightgrey.svg)](http://creativecommons.org/licenses/by-nc-nd/4.0/)
-[![NeurIPS 2025](https://img.shields.io/badge/NeurIPS-2025-purple.svg)](https://neurips.cc/virtual/2025/poster/114997)
-[![OpenReview](https://img.shields.io/badge/OpenReview-PDF-red.svg)](https://openreview.net/pdf?id=zyopvwZbSj)
-[![Citation](https://img.shields.io/badge/Citation-BibTeX-green.svg)](#citation)
+[![NeurIPS 2025](https://img.shields.io/badge/NeurIPS-2025-blue.svg)](https://neurips.cc/virtual/2025/poster/114997)
 [![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/)
-[![PyTorch 2.2.2](https://img.shields.io/badge/pytorch-2.2.2-pink.svg)](https://pytorch.org/)
+[![PyTorch 2.2.2](https://img.shields.io/badge/pytorch-2.2.2-red.svg)](https://pytorch.org/)
 
 Official implementation of **GeneFlow: Translation of Single-cell Gene Expression to Histopathological Images via Rectified Flow** (NeurIPS 2025).
+
+[Paper](https://neurips.cc/virtual/2025/poster/114997) | [Citation](#citation)
 
 ![cover](misc/genecover.png "Cover")
 
 ---
 
+## Table of Contents
+
+- [News](#news)
+- [Overview](#overview)
+- [Installation](#installation)
+- [Data](#data)
+- [Pretrained Checkpoints](#pretrained-checkpoints)
+- [Training](#training)
+- [Generation](#generation)
+- [Evaluation](#evaluation)
+- [Model Architecture](#model-architecture)
+- [Citation](#citation)
+- [License](#license)
+- [Contact](#contact)
+
+---
+
 ## News
 
-- **November 2025**: Initial release of GeneFlow codebase
+- **October 2025**: Initial release of GeneFlow codebase
 - **October 2025**: Preprocessed demo Xenium samples released on Zenodo
 - **September 2025**: Paper accepted at NeurIPS 2025
 
@@ -97,6 +114,29 @@ python utils/prepare_hestxenium_data.py \
     --img_size 256 \
     --img_channels 4
 ```
+
+---
+
+## Pretrained Checkpoints
+
+Pretrained checkpoints are hosted on Hugging Face: [wangmengbo/GeneFlow](https://huggingface.co/wangmengbo/GeneFlow)
+
+| Checkpoint | Sample | Model type | Epoch | Val loss | SSIM | FID | UNI2-h FID |
+|---|---|---|---|---|---|---|---|
+| [`P1_single`](https://huggingface.co/wangmengbo/GeneFlow/blob/main/P1_single/checkpoint_epoch_80_loss_0.0300.pt) | XeniumP1 | single-cell | 80 | 0.0300 | 0.1991 | 12.25 | 25.44 |
+| [`C1_single`](https://huggingface.co/wangmengbo/GeneFlow/blob/main/C1_single/checkpoint_epoch_42_loss_0.0238.pt) | XeniumC1 | single-cell | 42 | 0.0238 | 0.2584 | 12.40 | 26.32 |
+| [`C1_multi`](https://huggingface.co/wangmengbo/GeneFlow/blob/main/C1_multi/checkpoint_epoch_80_loss_0.0330.pt) | XeniumC1 | multi-cell (patch) | 80 | 0.0330 | 0.2884 | 39.21 | 91.06 |
+
+All three checkpoints match or exceed the metrics reported in the paper (Table 2 / Table 5).
+
+Download with the `huggingface_hub` CLI:
+
+```bash
+pip install huggingface_hub
+hf download wangmengbo/GeneFlow P1_single/checkpoint_epoch_80_loss_0.0300.pt --local-dir ./checkpoints
+```
+
+Then point `--model_path` at the downloaded `.pt` file for [generation](#generation) or [evaluation](#evaluation).
 
 ---
 
@@ -332,10 +372,10 @@ Evaluation produces:
 If you find this work useful, please cite:
 
 ```bibtex
-@inproceedings{wanggeneflow,
+@inproceedings{geneflow2025,
   title={GeneFlow: Translation of Single-cell Gene Expression to Histopathological Images via Rectified Flow},
-  author={Wang, Mengbo and Verma, Shourya and Malusare, Aditya and Wang, Luopin and Lu, Yiyang and Aggarwal, Vaneet and Sola, Mario and Grama, Ananth and Lanman, Nadia Atallah},
-  booktitle={The Thirty-ninth Annual Conference on Neural Information Processing Systems},
+  author={},
+  booktitle={Advances in Neural Information Processing Systems},
   year={2025}
 }
 ```
