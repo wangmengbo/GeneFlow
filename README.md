@@ -372,11 +372,13 @@ Evaluation produces:
 If you find this work useful, please cite:
 
 ```bibtex
-@inproceedings{geneflow2025,
-  title={GeneFlow: Translation of Single-cell Gene Expression to Histopathological Images via Rectified Flow},
-  author={},
-  booktitle={Advances in Neural Information Processing Systems},
-  year={2025}
+@article{wang2026geneflow,
+  title={GeneFlow: Translation of single-cell gene expression to histopathological images via rectified flow},
+  author={Wang, Mengbo and Verma, Shourya and Malusare, Aditya and Wang, Luopin and Lu, Yiyang and Aggarwal, Vaneet and Sola, Mario and Grama, Ananth and Lanman, Nadia},
+  journal={Advances in Neural Information Processing Systems},
+  volume={38},
+  pages={45396--45429},
+  year={2026}
 }
 ```
 
